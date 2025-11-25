@@ -1,0 +1,35 @@
+services:
+  hummingbot:
+    container_name: hummingbot
+    image: hummingbot/hummingbot:latest
+    volumes:
+      - ./conf:/home/hummingbot/conf
+      - ./conf/connectors:/home/hummingbot/conf/connectors
+      - ./conf/strategies:/home/hummingbot/conf/strategies
+      - ./conf/controllers:/home/hummingbot/conf/controllers
+      - ./conf/scripts:/home/hummingbot/conf/scripts
+      - ./logs:/home/hummingbot/logs
+      - ./data:/home/hummingbot/data
+      - ./certs:/home/hummingbot/certs
+      - ./scripts:/home/hummingbot/scripts
+      - ./controllers:/home/hummingbot/controllers
+      # 🆕 挂载回测脚本
+      - ./run_ai_agent_backtest.py:/home/hummingbot/run_ai_agent_backtest.py
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    tty: true
+    stdin_open: true
+    network_mode: host
+    # 🆕 自动安装 AI 依赖
+    entrypoint: /bin/bash -c "
+      source /root/.bashrc && 
+      conda activate hummingbot && 
+      echo '📦 安装 AI 依赖...' &&
+      pip install pandas-ta langchain-core langchain-openai --quiet && 
+      echo '✅ AI 依赖已安装' &&
+      exec ./bin/hummingbot_quickstart.py 2>> ./logs/errors.log
+      "
+
