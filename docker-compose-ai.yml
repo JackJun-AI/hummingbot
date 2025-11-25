@@ -23,13 +23,15 @@ services:
     tty: true
     stdin_open: true
     network_mode: host
-    # 🆕 自动安装 AI 依赖
-    entrypoint: /bin/bash -c "
+    # 🆕 自动安装 AI 依赖并保持容器运行
+    command: >
+      bash -c "
       source /root/.bashrc && 
       conda activate hummingbot && 
       echo '📦 安装 AI 依赖...' &&
       pip install pandas-ta langchain-core langchain-openai --quiet && 
       echo '✅ AI 依赖已安装' &&
-      exec ./bin/hummingbot_quickstart.py 2>> ./logs/errors.log
+      echo '🚀 容器已就绪，可以运行回测' &&
+      tail -f /dev/null
       "
 
