@@ -1,6 +1,6 @@
 services:
   hummingbot:
-    container_name: hummingbot
+    container_name: hummingbot-test
     image: hummingbot/hummingbot:latest
     volumes:
       - ./conf:/home/hummingbot/conf
