@@ -160,7 +160,8 @@ def analyze_results(results, start_date: str, end_date: str):
         try:
             symbol = executor.config.trading_pair
             side = executor.config.side.name
-            entry_price = float(executor.config.entry_price)
+            # ⚠️  使用 executor.entry_price (实际成交价) 而不是 config.entry_price
+            entry_price = float(executor.entry_price) if hasattr(executor, 'entry_price') and executor.entry_price else 0
             
             # PnL
             pnl_quote = float(executor.net_pnl_quote) if hasattr(executor, 'net_pnl_quote') else 0

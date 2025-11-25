@@ -130,9 +130,6 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         self._last_decision_time = 0
         self._decision_in_progress = False
         
-        # 历史交易记录（简化版，实际应该用数据库）
-        self._trade_history: List[Dict] = []
-        
         # 初始化 LangChain LLM
         self._init_langchain_llm()
         
@@ -306,10 +303,24 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         return positions
     
     def _get_recent_trades(self, limit: int = 10) -> List[Dict]:
-        """获取最近的交易记录"""
-        # 简化版：从内存获取
-        # 实际应该从数据库获取
-        return self._trade_history[-limit:] if self._trade_history else []
+        """
+        获取最近的交易记录
+        
+        从 executors_info 中提取已完成的交易
+        """
+        closed_executors = [
+            {
+                "symbol": e.config.trading_pair,
+                "side": e.config.side.name,
+                "entry_price": float(e.entry_price) if hasattr(e, 'entry_price') else 0,
+                "pnl_pct": float(e.net_pnl_pct) if hasattr(e, 'net_pnl_pct') else 0,
+                "pnl_quote": float(e.net_pnl_quote) if hasattr(e, 'net_pnl_quote') else 0,
+                "timestamp": e.timestamp if hasattr(e, 'timestamp') else 0,
+            }
+            for e in self.executors_info
+            if hasattr(e, 'status') and str(e.status) == 'RunnableStatus.TERMINATED'
+        ]
+        return closed_executors[-limit:] if closed_executors else []
     
     async def _get_market_info(self, trading_pair: str) -> Dict:
         """获取单个币种的市场信息"""
@@ -691,6 +702,45 @@ You must respond with a JSON array in this exact format:
         
         return validated
     
+    def _get_current_price(self, trading_pair: str) -> Optional[Decimal]:
+        """
+        获取当前价格 (支持回测和实盘)
+        
+        回测时从 K 线数据获取最新价格，因为 market_data_provider.prices 只支持单交易对
+        """
+        try:
+            # 方法 1: 尝试从 market_data_provider 获取（实盘）
+            price = self.market_data_provider.get_price_by_type(
+                self.config.connector_name,
+                trading_pair,
+                price_type=PriceType.MidPrice
+            )
+            
+            # 如果价格是默认值 1.0，说明回测时没有设置，从 K 线获取
+            if price == Decimal("1") or price is None:
+                # 方法 2: 从 K 线数据获取最新 close 价格（回测）
+                candles_df = self.market_data_provider.get_candles_df(
+                    connector_name=self.config.connector_name,
+                    trading_pair=trading_pair,
+                    interval=self.config.candles_interval,
+                    max_records=1
+                )
+                
+                if not candles_df.empty:
+                    # 获取最新 K 线的收盘价
+                    latest_close = candles_df.iloc[-1]["close"]
+                    price = Decimal(str(latest_close))
+                    self.logger().debug(f"Got price from candles for {trading_pair}: {price}")
+                else:
+                    self.logger().warning(f"No candles data available for {trading_pair}")
+                    return None
+            
+            return price
+            
+        except Exception as e:
+            self.logger().error(f"Failed to get price for {trading_pair}: {e}", exc_info=True)
+            return None
+    
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """
         根据 AI 决策生成 Executor Actions
@@ -751,15 +801,12 @@ You must respond with a JSON array in this exact format:
         """创建开仓 Action"""
         symbol = decision["symbol"]
         
-        # 获取当前价格（使用 MidPrice）
-        price = self.market_data_provider.get_price_by_type(
-            self.config.connector_name,
-            symbol,
-            price_type=PriceType.MidPrice
-        )
+        # 获取当前价格（用于计算仓位大小）
+        # ⚠️  Workaround: 回测引擎不支持多交易对，需要从 K 线数据获取价格
+        price = self._get_current_price(symbol)
         
-        if price is None:
-            self.logger().warning(f"Cannot get price for {symbol}")
+        if price is None or price <= 0:
+            self.logger().warning(f"Cannot get valid price for {symbol}, got {price}")
             return None
         
         # 计算仓位大小
@@ -775,19 +822,20 @@ You must respond with a JSON array in this exact format:
         triple_barrier.stop_loss = stop_loss_pct
         triple_barrier.take_profit = take_profit_pct
         
+        # ⚠️  重要：entry_price 设为 None，让 executor 使用市价单自动成交
         executor_config = PositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
             connector_name=self.config.connector_name,
             trading_pair=symbol,
             side=trade_type,
-            entry_price=price,
+            entry_price=None,  # None = 市价单，由 executor 自动获取实际成交价
             amount=amount,
             triple_barrier_config=triple_barrier,
             leverage=self.config.leverage,
         )
         
         self.logger().info(
-            f"📈 Creating {trade_type.name} position for {symbol} @ ${price:.2f}, "
+            f"📈 Creating {trade_type.name} position for {symbol} @ market price (est. ${price:.2f}), "
             f"Amount: {amount:.4f}, SL: {stop_loss_pct*100:.1f}%, TP: {take_profit_pct*100:.1f}%"
         )
         
@@ -823,39 +871,10 @@ You must respond with a JSON array in this exact format:
         
         self.logger().info(f"📉 Closing position for {symbol}, Executor ID: {target_executor.id}")
         
-        # 记录交易历史
-        self._record_trade(target_executor)
-        
         return StopExecutorAction(
             controller_id=self.config.id,
             executor_id=target_executor.id
         )
-    
-    def _record_trade(self, executor):
-        """记录交易到历史"""
-        try:
-            trade_record = {
-                "symbol": executor.config.trading_pair,
-                "side": executor.config.side.name,
-                "entry_price": float(executor.config.entry_price),
-                "exit_price": float(self.market_data_provider.get_price_by_type(
-                    self.config.connector_name,
-                    executor.config.trading_pair,
-                    price_type=PriceType.MidPrice
-                )),
-                "pnl_pct": float(executor.net_pnl_pct),
-                "pnl_quote": float(executor.net_pnl_quote),
-                "timestamp": executor.timestamp,
-                "close_timestamp": time.time(),
-            }
-            self._trade_history.append(trade_record)
-            
-            # 限制历史记录数量
-            if len(self._trade_history) > 50:
-                self._trade_history = self._trade_history[-50:]
-                
-        except Exception as e:
-            self.logger().error(f"Failed to record trade: {e}")
     
     def to_format_status(self) -> List[str]:
         """格式化状态显示"""
@@ -884,10 +903,11 @@ You must respond with a JSON array in this exact format:
             next_decision_in = max(0, self.config.decision_interval - time_since_last)
             lines.append(f"Next Decision: in {int(next_decision_in)}s")
         
-        # 历史统计
-        if self._trade_history:
-            total_trades = len(self._trade_history)
-            winning_trades = sum(1 for t in self._trade_history if t["pnl_quote"] > 0)
+        # 历史统计（从 executors_info 获取）
+        closed_executors = [e for e in self.executors_info if hasattr(e, 'status') and str(e.status) == 'RunnableStatus.TERMINATED']
+        if closed_executors:
+            total_trades = len(closed_executors)
+            winning_trades = sum(1 for e in closed_executors if hasattr(e, 'net_pnl_quote') and float(e.net_pnl_quote) > 0)
             win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
             lines.append(f"Trade History: {total_trades} trades, Win Rate: {win_rate:.1f}%")
         
