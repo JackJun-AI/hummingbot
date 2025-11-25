@@ -175,10 +175,21 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         
         # 防止并发决策
         if self._decision_in_progress:
-            self.logger().debug("Decision already in progress, skipping")
-            return
+            # 检查是否超时（30秒）
+            if hasattr(self, '_decision_start_time'):
+                elapsed = time.time() - self._decision_start_time
+                if elapsed > 30:
+                    self.logger().warning(f"⚠️  Previous decision timeout after {elapsed:.1f}s, allowing new decision")
+                    self._decision_in_progress = False
+                else:
+                    self.logger().debug(f"Decision in progress ({elapsed:.1f}s elapsed), skipping")
+                    return
+            else:
+                self.logger().debug("Decision already in progress, skipping")
+                return
         
         self._decision_in_progress = True
+        self._decision_start_time = time.time()
         
         try:
             self.logger().info("=" * 80)
@@ -193,8 +204,19 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             
             # Step 2: 调用 LLM 获取决策
             self.logger().info("🧠 Step 2: Calling LLM for decisions...")
-            decisions = await self._get_ai_decisions(context)
-            self.logger().info(f"   ✅ LLM returned {len(decisions)} decisions")
+            
+            # 使用 asyncio.wait_for 添加超时保护
+            try:
+                decisions = await asyncio.wait_for(
+                    self._get_ai_decisions(context), 
+                    timeout=25.0  # 25 秒超时
+                )
+            except asyncio.TimeoutError:
+                self.logger().error("❌ LLM API call timeout after 25s")
+                decisions = []
+            
+            elapsed_time = time.time() - self._decision_start_time
+            self.logger().info(f"   ✅ LLM returned {len(decisions)} decisions (took {elapsed_time:.2f}s)")
             
             # 打印决策详情
             if decisions:
@@ -220,6 +242,8 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             self.logger().error(f"❌ Error in AI decision cycle: {e}", exc_info=True)
         finally:
             self._decision_in_progress = False
+            if hasattr(self, '_decision_start_time'):
+                delattr(self, '_decision_start_time')
     
     async def _build_trading_context(self) -> Dict:
         """
@@ -381,13 +405,19 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             system_prompt = self._build_system_prompt()
             user_prompt = self._build_user_prompt(context)
             
-            self.logger().debug(f"System prompt length: {len(system_prompt)} chars")
-            self.logger().debug(f"User prompt length: {len(user_prompt)} chars")
+            self.logger().info(f"System prompt length: {len(system_prompt)} chars")
+            self.logger().info(f"User prompt length: {len(user_prompt)} chars")
+            
+            # 打印 User Prompt 的前 500 字符用于调试
+            self.logger().info(f"User prompt preview:\n{user_prompt[:500]}...")
             
             # Step 2: 使用 LangChain 调用 LLM
             self.logger().info("Calling LLM API...")
             response = await self._call_langchain_llm(system_prompt, user_prompt)
             self.logger().info("LLM response received")
+            
+            # 打印完整响应用于调试
+            self.logger().info(f"LLM full response:\n{response}")
             
             # Step 3: 解析决策
             self.logger().debug("Parsing LLM response...")
@@ -407,7 +437,7 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
     
     def _build_system_prompt(self) -> str:
         """构建系统 Prompt"""
-        return f"""You are an expert cryptocurrency trading AI agent.
+        return f"""You are an expert cryptocurrency trading AI agent with an active trading style.
 
 **Trading Rules:**
 - You can trade these pairs: {', '.join(self.config.trading_pairs)}
@@ -416,11 +446,18 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
 - Always use stop loss and take profit
 - Risk/Reward ratio must be at least 1:2
 
+**Trading Style:**
+- Be PROACTIVE and look for trading opportunities
+- Make at least 1 trade decision per cycle unless market conditions are extremely unfavorable
+- Use technical indicators (RSI, MACD, EMA) to identify entry points
+- Consider funding rates for perpetual contracts
+- Learn from historical trades to avoid repeated mistakes
+
 **Available Actions:**
-1. "open_long" - Open a long position
-2. "open_short" - Open a short position
+1. "open_long" - Open a long position (do this when you see bullish signals)
+2. "open_short" - Open a short position (do this when you see bearish signals)
 3. "close_position" - Close an existing position
-4. "hold" - Take no action
+4. "hold" - Take no action (ONLY use this if market is extremely unclear)
 
 **Output Format:**
 You must respond with a JSON array in this exact format:
@@ -429,16 +466,10 @@ You must respond with a JSON array in this exact format:
   {{
     "action": "open_long",
     "symbol": "BTC-USDT",
-    "reasoning": "Strong uptrend with RSI oversold",
-    "stop_loss_pct": 0.02,
-    "take_profit_pct": 0.04,
+    "reasoning": "Strong uptrend with RSI oversold and MACD crossover",
+    "stop_loss_pct": 0.025,
+    "take_profit_pct": 0.05,
     "confidence": 75
-  }},
-  {{
-    "action": "close_position",
-    "symbol": "ETH-USDT",
-    "executor_id": "abc123",
-    "reasoning": "Take profit target reached"
   }}
 ]
 ```
@@ -446,8 +477,9 @@ You must respond with a JSON array in this exact format:
 **Important:**
 - Only output valid JSON, no other text
 - If no action is needed, return an empty array []
-- Consider funding rates for perpetual contracts
-- Learn from historical trades to avoid repeated mistakes
+- Try to make at least one trade decision per cycle
+- Be specific about your reasoning
+- Consider both technical indicators and market context
 """
     
     def _build_user_prompt(self, context: Dict) -> str:
