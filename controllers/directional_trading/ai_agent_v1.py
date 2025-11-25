@@ -739,7 +739,7 @@ You must respond with a JSON array in this exact format:
                     connector_name=self.config.connector_name,
                     trading_pair=trading_pair,
                     interval=self.config.candles_interval,
-                    max_records=1
+                    max_records=10  # 获取更多数据以确保有有效值
                 )
                 
                 if not candles_df.empty:
@@ -748,13 +748,18 @@ You must respond with a JSON array in this exact format:
                     price = Decimal(str(latest_close))
                     self.logger().debug(f"Got price from candles for {trading_pair}: {price}")
                 else:
-                    self.logger().warning(f"No candles data available for {trading_pair}")
+                    self.logger().error(f"❌ No candles data available for {trading_pair} - cannot get price!")
                     return None
+            
+            # 最后检查：确保价格有效
+            if price is None or price <= 0:
+                self.logger().error(f"❌ Invalid price for {trading_pair}: {price}")
+                return None
             
             return price
             
         except Exception as e:
-            self.logger().error(f"Failed to get price for {trading_pair}: {e}", exc_info=True)
+            self.logger().error(f"❌ Failed to get price for {trading_pair}: {e}", exc_info=True)
             return None
     
     def determine_executor_actions(self) -> List[ExecutorAction]:
@@ -817,17 +822,23 @@ You must respond with a JSON array in this exact format:
         """创建开仓 Action"""
         symbol = decision["symbol"]
         
+        self.logger().info(f"🔍 Attempting to create {trade_type.name} action for {symbol}...")
+        
         # 获取当前价格（用于计算仓位大小）
         # ⚠️  Workaround: 回测引擎不支持多交易对，需要从 K 线数据获取价格
         price = self._get_current_price(symbol)
         
         if price is None or price <= 0:
-            self.logger().warning(f"Cannot get valid price for {symbol}, got {price}")
+            self.logger().error(f"❌ Cannot get valid price for {symbol}, got {price} - SKIPPING this trade!")
             return None
+        
+        self.logger().info(f"   ✅ Got price for {symbol}: ${price:.2f}")
         
         # 计算仓位大小
         position_size_quote = self.config.total_amount_quote * self.config.single_position_size_pct
         amount = position_size_quote / price
+        
+        self.logger().debug(f"   Position size: ${position_size_quote:.2f} = {amount:.6f} {symbol.split('-')[0]}")
         
         # 止损止盈
         stop_loss_pct = Decimal(str(decision.get("stop_loss_pct", 0.02)))
@@ -837,6 +848,11 @@ You must respond with a JSON array in this exact format:
         triple_barrier = self.config.triple_barrier_config.copy()
         triple_barrier.stop_loss = stop_loss_pct
         triple_barrier.take_profit = take_profit_pct
+        
+        # 确保 price 不是 None（双重检查）
+        if price is None:
+            self.logger().error(f"❌ CRITICAL: price became None after validation! Symbol: {symbol}")
+            return None
         
         # ⚠️  重要：在回测中必须提供 entry_price，使用当前市价
         executor_config = PositionExecutorConfig(
@@ -851,7 +867,7 @@ You must respond with a JSON array in this exact format:
         )
         
         self.logger().info(
-            f"📈 Creating {trade_type.name} position for {symbol} @ market price (est. ${price:.2f}), "
+            f"📈 Creating {trade_type.name} position for {symbol} @ ${price:.2f}, "
             f"Amount: {amount:.4f}, SL: {stop_loss_pct*100:.1f}%, TP: {take_profit_pct*100:.1f}%"
         )
         
