@@ -136,7 +136,7 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         # 初始化 LangChain LLM
         self._init_langchain_llm()
         
-        self.logger().warning(f"AI Agent V1 initialized - monitoring {len(config.trading_pairs)} pairs")
+        self.logger().info(f"AI Agent V1 initialized - monitoring {len(config.trading_pairs)} pairs")
     
     def _init_langchain_llm(self):
         """初始化 LangChain LLM"""
@@ -155,7 +155,7 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             # JSON 输出解析器
             self.json_parser = JsonOutputParser()
             
-            self.logger().warning(f"LangChain LLM initialized: {self.config.llm_model}")
+            self.logger().info(f"LangChain LLM initialized: {self.config.llm_model}")
             
         except Exception as e:
             self.logger().error(f"Failed to initialize LangChain LLM: {e}")
@@ -192,18 +192,18 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         self._decision_start_time = time.time()
         
         try:
-            self.logger().warning("=" * 80)
-            self.logger().warning(f"🤖 Starting AI decision cycle (interval: {time_since_last}s)")
-            self.logger().warning("=" * 80)
+            self.logger().info("=" * 80)
+            self.logger().info(f"🤖 Starting AI decision cycle (interval: {time_since_last}s)")
+            self.logger().info("=" * 80)
             
             # Step 1: 收集交易上下文
-            self.logger().warning("📊 Step 1: Building trading context...")
+            self.logger().info("📊 Step 1: Building trading context...")
             context = await self._build_trading_context()
-            self.logger().warning(f"   ✅ Context built - {len(context['market_data'])} pairs, "
+            self.logger().info(f"   ✅ Context built - {len(context['market_data'])} pairs, "
                              f"{len(context['positions'])} positions")
             
             # Step 2: 调用 LLM 获取决策
-            self.logger().warning("🧠 Step 2: Calling LLM for decisions...")
+            self.logger().info("🧠 Step 2: Calling LLM for decisions...")
             
             # 使用 asyncio.wait_for 添加超时保护
             try:
@@ -216,12 +216,12 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 decisions = []
             
             elapsed_time = time.time() - self._decision_start_time
-            self.logger().warning(f"   ✅ LLM returned {len(decisions)} decisions (took {elapsed_time:.2f}s)")
+            self.logger().info(f"   ✅ LLM returned {len(decisions)} decisions (took {elapsed_time:.2f}s)")
             
             # 打印决策详情
             if decisions:
                 for i, dec in enumerate(decisions, 1):
-                    self.logger().warning(
+                    self.logger().info(
                         f"   Decision {i}: {dec.get('action')} {dec.get('symbol')} "
                         f"(confidence: {dec.get('confidence', 0)}%)"
                     )
@@ -234,9 +234,9 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             
             self._last_decision_time = current_time
             
-            self.logger().warning("=" * 80)
-            self.logger().warning(f"✅ Decision cycle completed - {len(decisions)} actions will be processed")
-            self.logger().warning("=" * 80)
+            self.logger().info("=" * 80)
+            self.logger().info(f"✅ Decision cycle completed - {len(decisions)} actions will be processed")
+            self.logger().info("=" * 80)
             
         except Exception as e:
             self.logger().error(f"❌ Error in AI decision cycle: {e}", exc_info=True)
@@ -405,29 +405,29 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             system_prompt = self._build_system_prompt()
             user_prompt = self._build_user_prompt(context)
             
-            self.logger().warning(f"System prompt length: {len(system_prompt)} chars")
-            self.logger().warning(f"User prompt length: {len(user_prompt)} chars")
+            self.logger().info(f"System prompt length: {len(system_prompt)} chars")
+            self.logger().info(f"User prompt length: {len(user_prompt)} chars")
             
             # 打印 User Prompt 的前 500 字符用于调试
-            self.logger().warning(f"User prompt preview:\n{user_prompt[:500]}...")
+            self.logger().info(f"User prompt preview:\n{user_prompt[:500]}...")
             
             # Step 2: 使用 LangChain 调用 LLM
-            self.logger().warning("Calling LLM API...")
+            self.logger().info("Calling LLM API...")
             response = await self._call_langchain_llm(system_prompt, user_prompt)
-            self.logger().warning("LLM response received")
+            self.logger().info("LLM response received")
             
             # 打印完整响应用于调试
-            self.logger().warning(f"LLM full response:\n{response}")
+            self.logger().info(f"LLM full response:\n{response}")
             
             # Step 3: 解析决策
             self.logger().debug("Parsing LLM response...")
             decisions = self._parse_ai_response(response)
-            self.logger().warning(f"Parsed {len(decisions)} raw decisions from LLM")
+            self.logger().info(f"Parsed {len(decisions)} raw decisions from LLM")
             
             # Step 4: 验证决策
             self.logger().debug("Validating decisions...")
             validated_decisions = self._validate_decisions(decisions, context)
-            self.logger().warning(f"Validated {len(validated_decisions)}/{len(decisions)} decisions")
+            self.logger().info(f"Validated {len(validated_decisions)}/{len(decisions)} decisions")
             
             return validated_decisions
             
@@ -446,18 +446,25 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
 - Always use stop loss and take profit
 - Risk/Reward ratio must be at least 1:2
 
+**🔥 CRITICAL RULE - MUST FOLLOW:**
+- **IF YOU HAVE 0 ACTIVE POSITIONS, YOU MUST OPEN AT LEAST ONE POSITION**
+- Choose the trading pair with the best technical setup (RSI, MACD, price action)
+- Decide between LONG or SHORT based on market conditions
+- Even in unclear markets, you MUST take a position if you have none
+
 **Trading Style:**
 - Be PROACTIVE and look for trading opportunities
 - Make at least 1 trade decision per cycle unless market conditions are extremely unfavorable
 - Use technical indicators (RSI, MACD, EMA) to identify entry points
 - Consider funding rates for perpetual contracts
 - Learn from historical trades to avoid repeated mistakes
+- Never stay idle when you have no positions
 
 **Available Actions:**
 1. "open_long" - Open a long position (do this when you see bullish signals)
 2. "open_short" - Open a short position (do this when you see bearish signals)
 3. "close_position" - Close an existing position
-4. "hold" - Take no action (ONLY use this if market is extremely unclear)
+4. "hold" - Take no action (ONLY use this if you already have active positions)
 
 **Output Format:**
 You must respond with a JSON array in this exact format:
@@ -476,7 +483,8 @@ You must respond with a JSON array in this exact format:
 
 **Important:**
 - Only output valid JSON, no other text
-- If no action is needed, return an empty array []
+- If you have NO positions, you MUST return at least one "open_long" or "open_short" action
+- If you already have positions at max capacity, you can return []
 - Try to make at least one trade decision per cycle
 - Be specific about your reasoning
 - Consider both technical indicators and market context
@@ -493,6 +501,11 @@ You must respond with a JSON array in this exact format:
         prompt_parts.append(f"Total Capital: ${context['account']['total_amount_quote']:.2f}")
         prompt_parts.append(f"Active Positions: {len(context['positions'])}/{self.config.max_concurrent_positions}")
         
+        # 🔥 强调：如果没有持仓必须开单
+        if len(context['positions']) == 0:
+            prompt_parts.append(f"\n⚠️  **ALERT: You have NO active positions! You MUST open at least one position now.**")
+            prompt_parts.append(f"Choose the best trading pair based on technical indicators below.")
+        
         # 2. 当前持仓
         if context["positions"]:
             prompt_parts.append(f"\n## Current Positions")
@@ -503,7 +516,7 @@ You must respond with a JSON array in this exact format:
                     f"ID: {pos['executor_id']}"
                 )
         else:
-            prompt_parts.append(f"\n## Current Positions: None")
+            prompt_parts.append(f"\n## Current Positions: None (YOU MUST OPEN A POSITION)")
         
         # 3. 市场数据
         prompt_parts.append(f"\n## Market Data")
@@ -535,7 +548,21 @@ You must respond with a JSON array in this exact format:
                 )
         
         prompt_parts.append(f"\n## Your Decision:")
-        prompt_parts.append(f"Based on the above information, what trades should we make?")
+        
+        # 根据持仓情况给出不同的指令
+        if len(context['positions']) == 0:
+            prompt_parts.append(f"🔥 **MANDATORY**: You have NO positions. You MUST open at least one position now.")
+            prompt_parts.append(f"Analyze the market data above and choose:")
+            prompt_parts.append(f"1. Which trading pair has the best setup?")
+            prompt_parts.append(f"2. Should you go LONG or SHORT?")
+            prompt_parts.append(f"3. Set appropriate stop loss and take profit.")
+        elif len(context['positions']) >= self.config.max_concurrent_positions:
+            prompt_parts.append(f"You have reached max positions ({self.config.max_concurrent_positions}).")
+            prompt_parts.append(f"Consider closing underperforming positions or holding current ones.")
+        else:
+            prompt_parts.append(f"You have {len(context['positions'])} position(s). Consider opening more or managing existing ones.")
+        
+        prompt_parts.append(f"\nProvide your trading decisions in JSON format.")
         
         return "\n".join(prompt_parts)
     
@@ -561,7 +588,7 @@ You must respond with a JSON array in this exact format:
             elapsed = time.time() - start_time
             content = response.content
             
-            self.logger().warning(f"LLM response received in {elapsed:.2f}s, length: {len(content)} chars")
+            self.logger().info(f"LLM response received in {elapsed:.2f}s, length: {len(content)} chars")
             self.logger().debug(f"LLM Response preview: {content[:300]}...")
             
             return content
@@ -598,7 +625,7 @@ You must respond with a JSON array in this exact format:
                 self.logger().warning("AI response is not a list, wrapping it")
                 decisions = [decisions] if decisions else []
             
-            self.logger().warning(f"Successfully parsed {len(decisions)} decisions from LLM response")
+            self.logger().info(f"Successfully parsed {len(decisions)} decisions from LLM response")
             
             # 打印每个决策的基本信息
             for i, dec in enumerate(decisions, 1):
@@ -613,7 +640,7 @@ You must respond with a JSON array in this exact format:
     
     def _validate_decisions(self, decisions: List[Dict], context: Dict) -> List[Dict]:
         """验证决策的合法性"""
-        self.logger().warning(f"Validating {len(decisions)} decisions...")
+        self.logger().info(f"Validating {len(decisions)} decisions...")
         
         validated = []
         current_positions = len(context["positions"])
@@ -657,7 +684,7 @@ You must respond with a JSON array in this exact format:
             
             validated.append(decision)
         
-        self.logger().warning(f"✅ Validation complete: {len(validated)}/{len(decisions)} decisions passed")
+        self.logger().info(f"✅ Validation complete: {len(validated)}/{len(decisions)} decisions passed")
         
         if len(validated) < len(decisions):
             self.logger().warning(f"⚠️  {len(decisions) - len(validated)} decisions were rejected")
@@ -671,7 +698,7 @@ You must respond with a JSON array in this exact format:
         # 获取 AI 决策
         ai_decisions = self.processed_data.get("ai_decisions", [])
         
-        self.logger().warning(f"🎯 Processing {len(ai_decisions)} AI decisions into executor actions...")
+        self.logger().info(f"🎯 Processing {len(ai_decisions)} AI decisions into executor actions...")
         
         if not ai_decisions:
             self.logger().warning("No AI decisions available to process")
@@ -690,7 +717,7 @@ You must respond with a JSON array in this exact format:
                     action = self._create_open_action(decision, TradeType.BUY)
                     if action:
                         actions.append(action)
-                        self.logger().warning(f"   ✅ Created LONG action for {symbol}")
+                        self.logger().info(f"   ✅ Created LONG action for {symbol}")
                     else:
                         self.logger().warning(f"   ⚠️  Failed to create LONG action for {symbol}")
                         
@@ -698,7 +725,7 @@ You must respond with a JSON array in this exact format:
                     action = self._create_open_action(decision, TradeType.SELL)
                     if action:
                         actions.append(action)
-                        self.logger().warning(f"   ✅ Created SHORT action for {symbol}")
+                        self.logger().info(f"   ✅ Created SHORT action for {symbol}")
                     else:
                         self.logger().warning(f"   ⚠️  Failed to create SHORT action for {symbol}")
                         
@@ -706,7 +733,7 @@ You must respond with a JSON array in this exact format:
                     action = self._create_close_action(decision)
                     if action:
                         actions.append(action)
-                        self.logger().warning(f"   ✅ Created CLOSE action for {symbol}")
+                        self.logger().info(f"   ✅ Created CLOSE action for {symbol}")
                     else:
                         self.logger().warning(f"   ⚠️  Failed to create CLOSE action for {symbol}")
                 else:
@@ -715,7 +742,7 @@ You must respond with a JSON array in this exact format:
             except Exception as e:
                 self.logger().error(f"   ❌ Error creating action for {symbol}: {e}", exc_info=True)
         
-        self.logger().warning(f"📋 Generated {len(actions)} executor actions from {len(ai_decisions)} decisions")
+        self.logger().info(f"📋 Generated {len(actions)} executor actions from {len(ai_decisions)} decisions")
         return actions
     
     def _create_open_action(self, decision: Dict, trade_type: TradeType) -> Optional[CreateExecutorAction]:
@@ -757,7 +784,7 @@ You must respond with a JSON array in this exact format:
             leverage=self.config.leverage,
         )
         
-        self.logger().warning(
+        self.logger().info(
             f"📈 Creating {trade_type.name} position for {symbol} @ ${price:.2f}, "
             f"Amount: {amount:.4f}, SL: {stop_loss_pct*100:.1f}%, TP: {take_profit_pct*100:.1f}%"
         )
@@ -792,7 +819,7 @@ You must respond with a JSON array in this exact format:
             self.logger().warning(f"Cannot find active executor for {symbol}")
             return None
         
-        self.logger().warning(f"📉 Closing position for {symbol}, Executor ID: {target_executor.id}")
+        self.logger().info(f"📉 Closing position for {symbol}, Executor ID: {target_executor.id}")
         
         # 记录交易历史
         self._record_trade(target_executor)
