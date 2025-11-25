@@ -339,27 +339,37 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
     async def _get_funding_rate(self, trading_pair: str) -> Dict:
         """获取资金费率（仅 Perpetual 合约）"""
         try:
-            # 检查是否有 connectors 属性（回测环境中可能没有）
-            if not hasattr(self, 'connectors'):
-                self.logger().debug(f"Connectors not available (backtest mode), skipping funding rate for {trading_pair}")
-                return {"rate": 0.0, "next_funding_time": 0}
+            # 方法 1: 使用 market_data_provider (推荐，适用于实盘和回测)
+            if hasattr(self, 'market_data_provider'):
+                try:
+                    funding_info = self.market_data_provider.get_funding_info(
+                        self.config.connector_name, 
+                        trading_pair
+                    )
+                    return {
+                        "rate": float(funding_info.rate),
+                        "next_funding_time": funding_info.next_funding_utc_timestamp,
+                    }
+                except Exception as e:
+                    self.logger().debug(f"market_data_provider.get_funding_info failed for {trading_pair}: {e}")
             
-            # 注意：这里需要根据实际交易所实现
-            # Hummingbot 的 connector 可能有 get_funding_info 方法
-            connector = self.connectors.get(self.config.connector_name)
-            if hasattr(connector, 'get_funding_info'):
-                funding_info = await connector.get_funding_info(trading_pair)
-                return {
-                    "rate": float(funding_info.rate),
-                    "next_funding_time": funding_info.next_funding_utc_timestamp,
-                }
-            else:
-                # Fallback: 手动调用交易所 API
-                return {"rate": 0.0, "note": "funding rate API not available"}
+            # 方法 2: 直接从 connector 获取 (仅实盘可用)
+            if hasattr(self, 'connectors'):
+                connector = self.connectors.get(self.config.connector_name)
+                if connector and hasattr(connector, 'get_funding_info'):
+                    funding_info = connector.get_funding_info(trading_pair)
+                    return {
+                        "rate": float(funding_info.rate),
+                        "next_funding_time": funding_info.next_funding_utc_timestamp,
+                    }
+            
+            # 方法 3: 回测环境，返回默认值
+            self.logger().debug(f"Funding info not available for {trading_pair} (backtest mode)")
+            return {"rate": 0.0, "next_funding_time": 0}
                 
         except Exception as e:
             self.logger().debug(f"Failed to get funding rate for {trading_pair}: {e}")
-            return {"error": str(e)}
+            return {"rate": 0.0, "next_funding_time": 0}
     
     async def _get_ai_decisions(self, context: Dict) -> List[Dict]:
         """
