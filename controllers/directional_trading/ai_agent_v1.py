@@ -11,7 +11,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_openai import ChatOpenAI
 from pydantic import Field
 
-from hummingbot.core.data_type.common import TradeType
+from hummingbot.core.data_type.common import TradeType, PriceType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy_v2.controllers.directional_trading_controller_base import (
     DirectionalTradingControllerBase,
@@ -743,17 +743,19 @@ You must respond with a JSON array in this exact format:
                 self.logger().error(f"   ❌ Error creating action for {symbol}: {e}", exc_info=True)
         
         self.logger().info(f"📋 Generated {len(actions)} executor actions from {len(ai_decisions)} decisions")
-        return actions
+        
+        # 过滤掉 None（安全检查）
+        return [action for action in actions if action is not None]
     
     def _create_open_action(self, decision: Dict, trade_type: TradeType) -> Optional[CreateExecutorAction]:
         """创建开仓 Action"""
         symbol = decision["symbol"]
         
-        # 获取当前价格
+        # 获取当前价格（使用 MidPrice）
         price = self.market_data_provider.get_price_by_type(
             self.config.connector_name,
             symbol,
-            price_type=self.get_price_type(trade_type)
+            price_type=PriceType.MidPrice
         )
         
         if price is None:
@@ -839,7 +841,7 @@ You must respond with a JSON array in this exact format:
                 "exit_price": float(self.market_data_provider.get_price_by_type(
                     self.config.connector_name,
                     executor.config.trading_pair,
-                    price_type=self.get_price_type(executor.config.side)
+                    price_type=PriceType.MidPrice
                 )),
                 "pnl_pct": float(executor.net_pnl_pct),
                 "pnl_quote": float(executor.net_pnl_quote),
