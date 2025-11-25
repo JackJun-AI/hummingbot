@@ -52,6 +52,22 @@ class AIAgentV1Config(DirectionalTradingControllerConfigBase):
         }
     )
     
+    llm_temperature: Decimal = Field(
+        default=Decimal("0.1"),
+        json_schema_extra={
+            "prompt": "Enter LLM temperature (0.0-1.0, lower = more conservative): ",
+            "prompt_on_new": True
+        }
+    )
+    
+    llm_max_tokens: int = Field(
+        default=4000,
+        json_schema_extra={
+            "prompt": "Enter LLM max tokens: ",
+            "prompt_on_new": True
+        }
+    )
+    
     # 决策间隔（秒）
     decision_interval: int = Field(
         default=180,  # 3分钟
@@ -143,8 +159,8 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 model=self.config.llm_model,
                 openai_api_key=self.config.openrouter_api_key,
                 openai_api_base="https://openrouter.ai/api/v1",
-                temperature=0.7,
-                max_tokens=2000,
+                temperature=float(self.config.llm_temperature),
+                max_tokens=self.config.llm_max_tokens,
                 timeout=30,
                 max_retries=2,
             )
@@ -822,13 +838,13 @@ You must respond with a JSON array in this exact format:
         triple_barrier.stop_loss = stop_loss_pct
         triple_barrier.take_profit = take_profit_pct
         
-        # ⚠️  重要：entry_price 设为 None，让 executor 使用市价单自动成交
+        # ⚠️  重要：在回测中必须提供 entry_price，使用当前市价
         executor_config = PositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
             connector_name=self.config.connector_name,
             trading_pair=symbol,
             side=trade_type,
-            entry_price=None,  # None = 市价单，由 executor 自动获取实际成交价
+            entry_price=price,  # 使用当前市价作为入场价（回测必需）
             amount=amount,
             triple_barrier_config=triple_barrier,
             leverage=self.config.leverage,
