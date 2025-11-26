@@ -9,7 +9,8 @@ import pandas_ta as ta
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_openai import ChatOpenAI
-from pydantic import Field
+from pydantic import Field, field_validator
+from pydantic_core.core_schema import ValidationInfo
 
 from hummingbot.core.data_type.common import TradeType, PriceType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
@@ -24,6 +25,30 @@ from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction,
 class AIAgentV1Config(DirectionalTradingControllerConfigBase):
     """AI Agent Trading Controller Configuration"""
     controller_name: str = "ai_agent_v1"
+    
+    # K线配置（回测必需，与 Bollinger V1 保持一致）
+    candles_config: List[CandlesConfig] = []
+    candles_connector: str = Field(
+        default=None,
+        json_schema_extra={
+            "prompt": "Enter the connector for the candles data, leave empty to use the same exchange as the connector: ",
+            "prompt_on_new": True
+        }
+    )
+    candles_trading_pair: str = Field(
+        default=None,
+        json_schema_extra={
+            "prompt": "Enter the trading pair for the candles data, leave empty to use the same trading pair as the connector: ",
+            "prompt_on_new": True
+        }
+    )
+    interval: str = Field(
+        default="5m",
+        json_schema_extra={
+            "prompt": "Enter the candle interval (e.g., 1m, 5m, 1h, 1d): ",
+            "prompt_on_new": True
+        }
+    )
     
     # 多币种配置
     trading_pairs: List[str] = Field(
@@ -113,6 +138,21 @@ class AIAgentV1Config(DirectionalTradingControllerConfigBase):
             "is_updatable": True
         }
     )
+    
+    # Validators（自动设置 candles_connector 和 candles_trading_pair）
+    @field_validator("candles_connector", mode="before")
+    @classmethod
+    def set_candles_connector(cls, v, validation_info: ValidationInfo):
+        if v is None or v == "":
+            return validation_info.data.get("connector_name")
+        return v
+
+    @field_validator("candles_trading_pair", mode="before")
+    @classmethod
+    def set_candles_trading_pair(cls, v, validation_info: ValidationInfo):
+        if v is None or v == "":
+            return validation_info.data.get("trading_pair")
+        return v
 
 
 class AIAgentV1Controller(DirectionalTradingControllerBase):
@@ -130,12 +170,13 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         self.config = config
         
         # 为每个交易对配置K线数据
+        # 与 Bollinger V1 保持一致的初始化逻辑
         if len(self.config.candles_config) == 0:
             self.config.candles_config = [
                 CandlesConfig(
-                    connector=config.connector_name,
+                    connector=config.candles_connector,
                     trading_pair=pair,
-                    interval=config.candles_interval,
+                    interval=config.interval,  # 使用 interval 字段（与 candles_interval 保持同步）
                     max_records=config.candles_max_records
                 ) for pair in config.trading_pairs
             ]
@@ -345,7 +386,7 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             candles = self.market_data_provider.get_candles_df(
                 connector_name=self.config.connector_name,
                 trading_pair=trading_pair,
-                interval=self.config.candles_interval,
+                interval=self.config.interval,
                 max_records=self.config.candles_max_records
             )
             
@@ -738,7 +779,7 @@ You must respond with a JSON array in this exact format:
                 candles_df = self.market_data_provider.get_candles_df(
                     connector_name=self.config.connector_name,
                     trading_pair=trading_pair,
-                    interval=self.config.candles_interval,
+                    interval=self.config.interval,
                     max_records=10  # 获取更多数据以确保有有效值
                 )
                 
