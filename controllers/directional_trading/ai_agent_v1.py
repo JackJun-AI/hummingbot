@@ -236,10 +236,10 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                     self.logger().warning(f"⚠️  Previous decision timeout after {elapsed:.1f}s, allowing new decision")
                     self._decision_in_progress = False
                 else:
-                    self.logger().debug(f"Decision in progress ({elapsed:.1f}s elapsed), skipping")
+                    self.logger().warning(f"Decision in progress ({elapsed:.1f}s elapsed), skipping")
                     return
             else:
-                self.logger().debug("Decision already in progress, skipping")
+                self.logger().warning("Decision already in progress, skipping")
                 return
         
         self._decision_in_progress = True
@@ -247,7 +247,7 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         
         try:
             self.logger().info("=" * 80)
-            self.logger().info(f"🤖 Starting AI decision cycle (interval: {time_since_last}s)")
+            self.logger().warning(f"🤖 Starting AI decision cycle (interval: {time_since_last}s)")
             self.logger().info("=" * 80)
             
             # Step 1: 收集交易上下文
