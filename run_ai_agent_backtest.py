@@ -340,7 +340,7 @@ def main():
         backtesting_resolution=args.resolution,
         trade_cost=args.trade_cost
     ))
-    
+    print(results)
     # 分析结果
     if results:
         analyze_results(results, args.start, args.end)
