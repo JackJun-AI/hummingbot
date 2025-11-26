@@ -156,48 +156,48 @@ def analyze_results(results, start_date: str, end_date: str):
     winning_trades = 0
     losing_trades = 0
     
-    for i, executor in enumerate(executors, 1):
-        try:
-            symbol = executor.config.trading_pair
-            side = executor.config.side.name
-            # ⚠️  使用 executor.entry_price (实际成交价) 而不是 config.entry_price
-            entry_price = float(executor.entry_price) if hasattr(executor, 'entry_price') and executor.entry_price else 0
+    # for i, executor in enumerate(executors, 1):
+    #     try:
+    #         symbol = executor.config.trading_pair
+    #         side = executor.config.side.name
+    #         # ⚠️  使用 executor.entry_price (实际成交价) 而不是 config.entry_price
+    #         entry_price = float(executor.entry_price) if hasattr(executor, 'entry_price') and executor.entry_price else 0
             
-            # PnL
-            pnl_quote = float(executor.net_pnl_quote) if hasattr(executor, 'net_pnl_quote') else 0
-            pnl_pct = float(executor.net_pnl_pct) if hasattr(executor, 'net_pnl_pct') else 0
+    #         # PnL
+    #         pnl_quote = float(executor.net_pnl_quote) if hasattr(executor, 'net_pnl_quote') else 0
+    #         pnl_pct = float(executor.net_pnl_pct) if hasattr(executor, 'net_pnl_pct') else 0
             
-            # 状态
-            status = executor.status if hasattr(executor, 'status') else "UNKNOWN"
+    #         # 状态
+    #         status = executor.status if hasattr(executor, 'status') else "UNKNOWN"
             
-            # 累计统计
-            total_pnl_quote += pnl_quote
-            total_pnl_pct += pnl_pct
+    #         # 累计统计
+    #         total_pnl_quote += pnl_quote
+    #         total_pnl_pct += pnl_pct
             
-            if pnl_quote > 0:
-                winning_trades += 1
-                result_emoji = "✅"
-                result_text = "盈利"
-            elif pnl_quote < 0:
-                losing_trades += 1
-                result_emoji = "❌"
-                result_text = "亏损"
-            else:
-                result_emoji = "➖"
-                result_text = "平手"
+    #         if pnl_quote > 0:
+    #             winning_trades += 1
+    #             result_emoji = "✅"
+    #             result_text = "盈利"
+    #         elif pnl_quote < 0:
+    #             losing_trades += 1
+    #             result_emoji = "❌"
+    #             result_text = "亏损"
+    #         else:
+    #             result_emoji = "➖"
+    #             result_text = "平手"
             
-            print(f"\n   交易 #{i}:")
-            print(f"   币种: {symbol} | 方向: {side} | 状态: {status}")
-            print(f"   入场价: ${entry_price:.4f}")
-            print(f"   PnL: ${pnl_quote:.2f} ({pnl_pct*100:.2f}%) {result_emoji} {result_text}")
+    #         print(f"\n   交易 #{i}:")
+    #         print(f"   币种: {symbol} | 方向: {side} | 状态: {status}")
+    #         print(f"   入场价: ${entry_price:.4f}")
+    #         print(f"   PnL: ${pnl_quote:.2f} ({pnl_pct*100:.2f}%) {result_emoji} {result_text}")
             
-            # 如果有更多详细信息
-            if hasattr(executor, 'close_timestamp'):
-                duration = executor.close_timestamp - executor.timestamp
-                print(f"   持仓时长: {duration/3600:.1f} 小时")
+    #         # 如果有更多详细信息
+    #         if hasattr(executor, 'close_timestamp'):
+    #             duration = executor.close_timestamp - executor.timestamp
+    #             print(f"   持仓时长: {duration/3600:.1f} 小时")
                 
-        except Exception as e:
-            print(f"   ⚠️  交易 #{i} 解析失败: {e}")
+    #     except Exception as e:
+    #         print(f"   ⚠️  交易 #{i} 解析失败: {e}")
     
     # 总体表现
     print(f"\n" + "=" * 60)
