@@ -540,10 +540,19 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
 - **Exchange**: {self.config.connector_name}
 - **Available Pairs**: {', '.join(self.config.trading_pairs)}
 - **Max Concurrent Positions**: {self.config.max_concurrent_positions}
-- **Position Size**: {float(self.config.single_position_size_pct) * 100}% of capital per trade
-- **Base Stop Loss**: {float(self.config.triple_barrier_config.stop_loss) * 100}%
-- **Base Take Profit**: {float(self.config.triple_barrier_config.take_profit) * 100}%
-- **Max Hold Time**: {self.config.triple_barrier_config.time_limit / 3600:.1f} hours
+- **Position Size**: {float(self.config.single_position_size_pct) * 100}% of capital per trade"""
+        
+        # 🔧 修复：stop_loss, take_profit, time_limit 可能为 None
+        if self.config.triple_barrier_config.stop_loss is not None:
+            system_prompt += f"\n- **Base Stop Loss**: {float(self.config.triple_barrier_config.stop_loss) * 100}%"
+        
+        if self.config.triple_barrier_config.take_profit is not None:
+            system_prompt += f"\n- **Base Take Profit**: {float(self.config.triple_barrier_config.take_profit) * 100}%"
+        
+        if self.config.triple_barrier_config.time_limit is not None:
+            system_prompt += f"\n- **Max Hold Time**: {self.config.triple_barrier_config.time_limit / 3600:.1f} hours"
+        
+        system_prompt += """
 
 ## Market Type
 - **Perpetual Contracts**: No expiration, funding rate mechanism
