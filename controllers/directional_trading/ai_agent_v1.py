@@ -394,37 +394,42 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             
             self.logger().warning(f"Received {len(candles) if not candles.empty else 0} candles for {trading_pair}")
             
-            if candles.empty or len(candles) < 20:
+            # 🔧 修复：如果数据不足，返回基础信息而不是错误
+            # 在回测早期，数据可能不足 20 根，但仍应提供价格信息
+            if candles.empty:
                 self.logger().warning(
-                    f"❌ Insufficient candles for {trading_pair}: {len(candles) if not candles.empty else 0} rows\n"
+                    f"❌ No candles for {trading_pair}\n"
                     f"   Current time: {pd.to_datetime(current_time, unit='s') if 'current_time' in locals() else 'N/A'}\n"
                     f"   Available feeds: {available_keys}\n"
                     f"   Looking for: {self.config.connector_name}_{trading_pair}_{self.config.interval}"
                 )
-                return {"error": "insufficient_data", "symbol": trading_pair, "candles_count": len(candles) if not candles.empty else 0}
+                return {"error": "no_data", "symbol": trading_pair, "candles_count": 0}
             
-            # 计算技术指标（只使用当前时刻及之前的数据）
+            # 计算技术指标（尽可能使用可用数据）
             close = candles["close"]
             high = candles["high"]
             low = candles["low"]
             
-            self.logger().debug(f"Calculating indicators for {trading_pair}...")
-            
-            rsi = ta.rsi(close, length=14)
-            macd = ta.macd(close, fast=12, slow=26, signal=9)
-            ema_20 = ta.ema(close, length=20)
-            
             current_price = float(close.iloc[-1])
+            candles_count = len(candles)
+            
+            self.logger().debug(f"Calculating indicators for {trading_pair} with {candles_count} candles...")
+            
+            # 🔧 技术指标可能返回 None（数据不足时）
+            rsi = ta.rsi(close, length=14) if candles_count >= 14 else None
+            macd = ta.macd(close, fast=12, slow=26, signal=9) if candles_count >= 26 else None
+            ema_20 = ta.ema(close, length=20) if candles_count >= 20 else None
             
             market_info = {
                 "symbol": trading_pair,
                 "current_price": current_price,
-                "rsi": float(rsi.iloc[-1]) if not rsi.isna().iloc[-1] else None,
-                "macd": float(macd[f"MACD_12_26_9"].iloc[-1]) if not macd.empty else None,
-                "macd_signal": float(macd[f"MACDs_12_26_9"].iloc[-1]) if not macd.empty else None,
-                "ema_20": float(ema_20.iloc[-1]) if not ema_20.isna().iloc[-1] else None,
+                "rsi": float(rsi.iloc[-1]) if rsi is not None and not rsi.isna().iloc[-1] else None,
+                "macd": float(macd[f"MACD_12_26_9"].iloc[-1]) if macd is not None and not macd.empty else None,
+                "macd_signal": float(macd[f"MACDs_12_26_9"].iloc[-1]) if macd is not None and not macd.empty else None,
+                "ema_20": float(ema_20.iloc[-1]) if ema_20 is not None and not ema_20.isna().iloc[-1] else None,
                 "price_change_24h_pct": self._calculate_price_change(candles),
                 "volume_24h": float(candles["volume"].sum()),
+                "candles_available": candles_count,  # 新增：告诉 AI 有多少数据
             }
             
             # 🔧 修复：先格式化值，再构建日志字符串
@@ -432,9 +437,12 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             macd_str = f"{market_info['macd']:.2f}" if market_info['macd'] is not None else 'N/A'
             ema_str = f"${market_info['ema_20']:.2f}" if market_info['ema_20'] is not None else 'N/A'
             
+            # 如果数据不足，添加警告
+            warning_suffix = f" (⚠️ Limited data: {candles_count} candles)" if candles_count < 20 else ""
+            
             self.logger().warning(
                 f"✅ {trading_pair}: Price=${current_price:.2f}, "
-                f"RSI={rsi_str}, MACD={macd_str}, EMA(20)={ema_str}"
+                f"RSI={rsi_str}, MACD={macd_str}, EMA(20)={ema_str}{warning_suffix}"
             )
             self.logger().warning(market_info)
             return market_info
@@ -758,19 +766,34 @@ Now analyze the market data and make your decision.
         
         # 3. 市场数据
         prompt_parts.append(f"\n# MARKET DATA")
+        
+        # 统计有多少数据不完整
+        limited_data_count = sum(1 for data in context["market_data"].values() 
+                                 if not "error" in data and data.get("candles_available", 100) < 20)
+        
+        if limited_data_count > 0:
+            prompt_parts.append(f"\n⚠️  **Data Limitation Notice**: {limited_data_count} pair(s) have limited historical data (<20 candles).")
+            prompt_parts.append("Technical indicators may be less reliable. Consider waiting or using caution.\n")
+        
         for symbol, data in context["market_data"].items():
             if "error" in data:
+                # 🔧 显示有错误的交易对
+                prompt_parts.append(f"\n## {symbol}")
+                prompt_parts.append(f"⚠️  Data unavailable: {data['error']}")
                 continue
+            
+            candles_available = data.get("candles_available", 100)
+            data_warning = f" (⚠️ Limited: {candles_available} candles)" if candles_available < 20 else ""
             
             funding_info = context["funding_rates"].get(symbol, {})
             funding_rate = funding_info.get("rate", 0.0)
             
             prompt_parts.append(
-                f"\n## {symbol}"
+                f"\n## {symbol}{data_warning}"
                 f"\n**Price & Trend:**"
                 f"\n- Current Price: ${data['current_price']:.2f}"
                 f"\n- 24h Change: {data['price_change_24h_pct']:.2f}%"
-                f"\n- EMA(20): ${data['ema_20']:.2f if data['ema_20'] else 'N/A'}"
+                f"\n- EMA(20): ${data['ema_20']:.2f if data['ema_20'] else 'N/A (insufficient data)'}"
             )
             
             if data['ema_20']:
@@ -781,7 +804,7 @@ Now analyze the market data and make your decision.
             
             prompt_parts.append(
                 f"\n**Technical Indicators:**"
-                f"\n- RSI: {data['rsi']:.1f if data['rsi'] else 'N/A'}"
+                f"\n- RSI: {data['rsi']:.1f if data['rsi'] else 'N/A (insufficient data)'}"
             )
             
             if data['rsi']:
@@ -793,8 +816,8 @@ Now analyze the market data and make your decision.
                     prompt_parts.append(f"  → Neutral")
             
             prompt_parts.append(
-                f"- MACD: {data['macd']:.2f if data['macd'] else 'N/A'}"
-                f"\n- MACD Signal: {data['macd_signal']:.2f if data['macd_signal'] else 'N/A'}"
+                f"- MACD: {data['macd']:.2f if data['macd'] else 'N/A (insufficient data)'}"
+                f"\n- MACD Signal: {data['macd_signal']:.2f if data['macd_signal'] else 'N/A (insufficient data)'}"
             )
             
             if data['macd'] and data['macd_signal']:
@@ -921,13 +944,32 @@ Now analyze the market data and make your decision.
                 self.logger().warning("AI response is not a list, wrapping it")
                 decisions = [decisions] if decisions else []
             
-            self.logger().info(f"Successfully parsed {len(decisions)} decisions from LLM response")
+            # 🔧 修复：兼容 "decision" 和 "action" 字段名
+            # 有些 LLM 可能返回 "decision": "wait" 而不是 "action": "hold"
+            normalized_decisions = []
+            for dec in decisions:
+                # 规范化决策对象
+                if "decision" in dec and "action" not in dec:
+                    # 转换：decision -> action
+                    dec["action"] = dec.pop("decision")
+                    self.logger().debug(f"Normalized 'decision' field to 'action': {dec.get('action')}")
+                
+                # 规范化 action 值
+                if dec.get("action") == "wait":
+                    dec["action"] = "hold"
+                    self.logger().debug("Normalized 'wait' action to 'hold'")
+                
+                normalized_decisions.append(dec)
+            
+            self.logger().info(f"Successfully parsed {len(normalized_decisions)} decisions from LLM response")
             
             # 打印每个决策的基本信息
-            for i, dec in enumerate(decisions, 1):
-                self.logger().debug(f"Decision {i}: {dec}")
+            for i, dec in enumerate(normalized_decisions, 1):
+                action = dec.get("action", "unknown")
+                symbol = dec.get("symbol", "N/A")
+                self.logger().debug(f"Decision {i}: action={action}, symbol={symbol}")
             
-            return decisions
+            return normalized_decisions
             
         except json.JSONDecodeError as e:
             self.logger().error(f"Failed to parse AI response as JSON: {e}")
@@ -954,12 +996,21 @@ Now analyze the market data and make your decision.
             symbol = decision.get("symbol")
             
             self.logger().debug(f"Validating decision {i}: {action} {symbol}")
-            self.logger().debug(f"   Reasoning: {reasoning[:100]}...")  # 打印前100字符
+            
+            # 🔧 修复：reasoning 可能是字符串或字典
+            if isinstance(reasoning, dict):
+                reasoning_preview = str(reasoning)[:100]
+            elif isinstance(reasoning, str):
+                reasoning_preview = reasoning[:100]
+            else:
+                reasoning_preview = str(reasoning)[:100]
+            
+            self.logger().debug(f"   Reasoning: {reasoning_preview}...")
             
             # hold 动作不需要 symbol
             if action == "hold":
                 validated.append(decision)
-                self.logger().info(f"✅ Decision {i}: HOLD - {reasoning[:50]}...")
+                self.logger().info(f"✅ Decision {i}: HOLD - {reasoning_preview[:50]}...")
                 continue
             
             # 其他动作需要 symbol
