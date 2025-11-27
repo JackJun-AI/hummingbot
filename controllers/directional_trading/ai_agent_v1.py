@@ -415,21 +415,34 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             
             self.logger().debug(f"Calculating indicators for {trading_pair} with {candles_count} candles...")
             
-            # 🔧 技术指标可能返回 None（数据不足时）
-            rsi = ta.rsi(close, length=14) if candles_count >= 14 else None
-            macd = ta.macd(close, fast=12, slow=26, signal=9) if candles_count >= 26 else None
-            ema_20 = ta.ema(close, length=20) if candles_count >= 20 else None
+            # 🔧 计算技术指标的完整序列（用于趋势分析）
+            rsi_series = ta.rsi(close, length=14) if candles_count >= 14 else None
+            macd_df = ta.macd(close, fast=12, slow=26, signal=9) if candles_count >= 26 else None
+            ema_20_series = ta.ema(close, length=20) if candles_count >= 20 else None
+            
+            # 提取最近 5 个值（显示趋势变化）
+            history_length = min(5, candles_count)
             
             market_info = {
                 "symbol": trading_pair,
                 "current_price": current_price,
-                "rsi": float(rsi.iloc[-1]) if rsi is not None and not rsi.isna().iloc[-1] else None,
-                "macd": float(macd[f"MACD_12_26_9"].iloc[-1]) if macd is not None and not macd.empty else None,
-                "macd_signal": float(macd[f"MACDs_12_26_9"].iloc[-1]) if macd is not None and not macd.empty else None,
-                "ema_20": float(ema_20.iloc[-1]) if ema_20 is not None and not ema_20.isna().iloc[-1] else None,
+                
+                # 当前值（向后兼容）
+                "rsi": float(rsi_series.iloc[-1]) if rsi_series is not None and not rsi_series.isna().iloc[-1] else None,
+                "macd": float(macd_df[f"MACD_12_26_9"].iloc[-1]) if macd_df is not None and not macd_df.empty else None,
+                "macd_signal": float(macd_df[f"MACDs_12_26_9"].iloc[-1]) if macd_df is not None and not macd_df.empty else None,
+                "ema_20": float(ema_20_series.iloc[-1]) if ema_20_series is not None and not ema_20_series.isna().iloc[-1] else None,
+                
+                # 🔑 新增：历史趋势数据（最近 5 个值）
+                "price_history": [float(p) for p in close.tail(history_length).tolist()],
+                "rsi_history": [float(v) for v in rsi_series.tail(history_length).tolist()] if rsi_series is not None else None,
+                "macd_history": [float(v) for v in macd_df[f"MACD_12_26_9"].tail(history_length).tolist()] if macd_df is not None else None,
+                "macd_signal_history": [float(v) for v in macd_df[f"MACDs_12_26_9"].tail(history_length).tolist()] if macd_df is not None else None,
+                "ema_20_history": [float(v) for v in ema_20_series.tail(history_length).tolist()] if ema_20_series is not None else None,
+                
                 "price_change_24h_pct": self._calculate_price_change(candles),
                 "volume_24h": float(candles["volume"].sum()),
-                "candles_available": candles_count,  # 新增：告诉 AI 有多少数据
+                "candles_available": candles_count,
             }
             
             # 🔧 修复：先格式化值，再构建日志字符串
@@ -444,7 +457,9 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 f"✅ {trading_pair}: Price=${current_price:.2f}, "
                 f"RSI={rsi_str}, MACD={macd_str}, EMA(20)={ema_str}{warning_suffix}"
             )
-            self.logger().warning(market_info)
+            self.logger().debug(f"   Price history (last 5): {market_info['price_history']}")
+            self.logger().debug(f"   RSI history (last 5): {market_info['rsi_history']}")
+            
             return market_info
             
         except Exception as e:
@@ -794,11 +809,26 @@ Now analyze the market data and make your decision.
             macd_str = f"{data['macd']:.2f}" if data['macd'] is not None else "N/A (insufficient data)"
             macd_signal_str = f"{data['macd_signal']:.2f}" if data['macd_signal'] is not None else "N/A (insufficient data)"
             
+            # 🔑 格式化历史趋势数据
+            price_hist = data.get('price_history', [])
+            rsi_hist = data.get('rsi_history', [])
+            macd_hist = data.get('macd_history', [])
+            
             prompt_parts.append(
                 f"\n## {symbol}{data_warning}"
                 f"\n**Price & Trend:**"
                 f"\n- Current Price: ${data['current_price']:.2f}"
-                f"\n- 24h Change: {data['price_change_24h_pct']:.2f}%"
+            )
+            
+            # 显示价格趋势（最近 5 个值）
+            if price_hist and len(price_hist) >= 2:
+                price_trend_str = " → ".join([f"${p:.2f}" for p in price_hist])
+                price_change = ((price_hist[-1] - price_hist[0]) / price_hist[0]) * 100
+                trend_emoji = "📈" if price_change > 0 else "📉" if price_change < 0 else "➡️"
+                prompt_parts.append(f"- Recent Price Trend: {price_trend_str} {trend_emoji} ({price_change:+.2f}%)")
+            
+            prompt_parts.append(
+                f"- 24h Change: {data['price_change_24h_pct']:.2f}%"
                 f"\n- EMA(20): {ema_str}"
             )
             
@@ -808,10 +838,15 @@ Now analyze the market data and make your decision.
                 else:
                     prompt_parts.append(f"- Trend: DOWNTREND (Price < EMA)")
             
-            prompt_parts.append(
-                f"\n**Technical Indicators:**"
-                f"\n- RSI: {rsi_str}"
-            )
+            prompt_parts.append(f"\n**Technical Indicators:**")
+            
+            # RSI 及其趋势
+            prompt_parts.append(f"- RSI: {rsi_str}")
+            if rsi_hist and len(rsi_hist) >= 2:
+                rsi_trend_str = " → ".join([f"{r:.1f}" for r in rsi_hist])
+                rsi_change = rsi_hist[-1] - rsi_hist[0]
+                momentum = "📈 Rising" if rsi_change > 5 else "📉 Falling" if rsi_change < -5 else "➡️ Stable"
+                prompt_parts.append(f"  Trend: {rsi_trend_str} ({momentum})")
             
             if data['rsi']:
                 if data['rsi'] > 70:
@@ -821,10 +856,15 @@ Now analyze the market data and make your decision.
                 else:
                     prompt_parts.append(f"  → Neutral")
             
-            prompt_parts.append(
-                f"- MACD: {macd_str}"
-                f"\n- MACD Signal: {macd_signal_str}"
-            )
+            # MACD 及其趋势
+            prompt_parts.append(f"- MACD: {macd_str}")
+            prompt_parts.append(f"- MACD Signal: {macd_signal_str}")
+            
+            if macd_hist and len(macd_hist) >= 2:
+                macd_trend_str = " → ".join([f"{m:.2f}" for m in macd_hist])
+                macd_change = macd_hist[-1] - macd_hist[0]
+                momentum = "📈 Strengthening" if macd_change > 0 else "📉 Weakening" if macd_change < 0 else "➡️ Stable"
+                prompt_parts.append(f"  Trend: {macd_trend_str} ({momentum})")
             
             if data['macd'] and data['macd_signal']:
                 if data['macd'] > data['macd_signal']:
@@ -841,7 +881,7 @@ Now analyze the market data and make your decision.
                 elif funding_rate < -0.0001:
                     prompt_parts.append(f"  → Bearish sentiment (shorts paying longs)")
                 else:
-                    prompt_parts.append(f"  → Neutral sentiment")
+                    prompt_parts.append(f"  → Neutral sentiment)")
         
         # 4. 历史交易记录
         if context["recent_trades"]:
