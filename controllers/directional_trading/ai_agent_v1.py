@@ -187,6 +187,10 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         self._last_decision_time = 0
         self._decision_in_progress = False
         
+        # 历史 Funding Rate 缓存（用于回测）
+        self._historical_funding_rates: Dict[str, pd.DataFrame] = {}
+        self._funding_rate_initialized = False
+        
         # 初始化 LangChain LLM
         self._init_langchain_llm()
         
@@ -216,6 +220,106 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             self.llm = None
             self.json_parser = None
     
+    async def _initialize_historical_funding_rates(self):
+        """
+        初始化历史 Funding Rate 数据（仅回测环境）
+        
+        通过 Binance API 下载回测时间范围内的历史 funding rate
+        API: GET /fapi/v1/fundingRate
+        """
+        if self._funding_rate_initialized:
+            return
+        
+        # 检测是否是回测环境
+        is_backtest = not hasattr(self, 'connectors') or not self.connectors
+        
+        if not is_backtest:
+            self.logger().info("Live trading mode - skipping historical funding rate download")
+            self._funding_rate_initialized = True
+            return
+        
+        # 只支持 Binance Perpetual
+        if "binance_perpetual" not in self.config.connector_name:
+            self.logger().warning(f"Historical funding rate download only supports binance_perpetual, got {self.config.connector_name}")
+            self._funding_rate_initialized = True
+            return
+        
+        self.logger().info("🔄 Downloading historical funding rates for backtest...")
+        
+        try:
+            import aiohttp
+            
+            # 获取回测时间范围
+            start_time = int(self.market_data_provider.start_time * 1000)  # 转换为 ms
+            end_time = int(self.market_data_provider.end_time * 1000)
+            
+            base_url = "https://fapi.binance.com"
+            
+            for trading_pair in self.config.trading_pairs:
+                # 转换交易对格式 BTC-USDT -> BTCUSDT
+                symbol = trading_pair.replace("-", "")
+                
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        all_funding_rates = []
+                        current_start = start_time
+                        
+                        # 分批下载（每次最多1000条）
+                        while current_start < end_time:
+                            url = f"{base_url}/fapi/v1/fundingRate"
+                            params = {
+                                "symbol": symbol,
+                                "startTime": current_start,
+                                "endTime": end_time,
+                                "limit": 1000
+                            }
+                            
+                            async with session.get(url, params=params) as response:
+                                if response.status == 200:
+                                    data = await response.json()
+                                    if not data:
+                                        break
+                                    
+                                    all_funding_rates.extend(data)
+                                    
+                                    # 更新下次查询的起始时间
+                                    current_start = data[-1]["fundingTime"] + 1
+                                    
+                                    if len(data) < 1000:
+                                        break
+                                else:
+                                    self.logger().error(
+                                        f"Failed to download funding rate for {trading_pair}: "
+                                        f"HTTP {response.status}"
+                                    )
+                                    break
+                        
+                        if all_funding_rates:
+                            # 转换为 DataFrame
+                            df = pd.DataFrame(all_funding_rates)
+                            df["fundingRate"] = df["fundingRate"].astype(float)
+                            df["fundingTime"] = df["fundingTime"].astype(int) / 1000  # 转换为秒
+                            df["markPrice"] = df["markPrice"].astype(float)
+                            
+                            self._historical_funding_rates[trading_pair] = df
+                            
+                            self.logger().info(
+                                f"✅ Downloaded {len(df)} funding rate records for {trading_pair} "
+                                f"(from {pd.to_datetime(df['fundingTime'].min(), unit='s')} to "
+                                f"{pd.to_datetime(df['fundingTime'].max(), unit='s')})"
+                            )
+                        else:
+                            self.logger().warning(f"No funding rate data found for {trading_pair}")
+                            
+                except Exception as e:
+                    self.logger().error(f"Failed to download funding rate for {trading_pair}: {e}", exc_info=True)
+                    
+        except Exception as e:
+            self.logger().error(f"Failed to initialize historical funding rates: {e}", exc_info=True)
+        
+        self._funding_rate_initialized = True
+        self.logger().info(f"📊 Historical funding rates initialized for {len(self._historical_funding_rates)} pairs")
+    
     async def update_processed_data(self):
         """
         更新处理后的数据
@@ -237,6 +341,10 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         """
         构建 AI 决策所需的完整上下文
         """
+        # 初始化历史 funding rate（仅回测环境，只在第一次调用时执行）
+        if not self._funding_rate_initialized:
+            await self._initialize_historical_funding_rates()
+        
         context = {
             "timestamp": self.market_data_provider.time(),
             "account": self._get_account_summary(),
@@ -482,9 +590,11 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 "macd_history": [float(v) for v in macd_df[f"MACD_12_26_9"].tail(history_length).tolist()] if macd_df is not None else None,
                 "macd_signal_history": [float(v) for v in macd_df[f"MACDs_12_26_9"].tail(history_length).tolist()] if macd_df is not None else None,
                 "ema_20_history": [float(v) for v in ema_20_series.tail(history_length).tolist()] if ema_20_series is not None else None,
+                "volume_history": [float(v) for v in candles["volume"].tail(history_length).tolist()],  # 成交量历史
                 
                 "price_change_24h_pct": self._calculate_price_change(candles),
-                "volume_24h": float(candles["volume"].sum()),
+                "volume_24h": float(candles["volume"].sum()),  # 24小时总成交量
+                "avg_volume": float(candles["volume"].mean()),  # 平均成交量
                 "candles_available": candles_count,
             }
             
@@ -518,9 +628,48 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         return ((last_price - first_price) / first_price) * 100
     
     async def _get_funding_rate(self, trading_pair: str) -> Dict:
-        """获取资金费率（仅 Perpetual 合约）"""
+        """
+        获取资金费率（仅 Perpetual 合约）
+        
+        优先级：
+        1. 历史数据（回测环境）
+        2. market_data_provider（实盘环境）
+        3. connector（实盘环境备选）
+        4. 默认值（fallback）
+        """
         try:
-            # 方法 1: 使用 market_data_provider (推荐，适用于实盘和回测)
+            current_time = self.market_data_provider.time()
+            
+            # 方法 1: 从历史数据查询（回测环境）
+            if trading_pair in self._historical_funding_rates:
+                df = self._historical_funding_rates[trading_pair]
+                
+                # 查找最接近当前时间的 funding rate
+                # funding rate 每8小时更新一次，找到距离当前时间最近且不晚于当前时间的那条
+                past_rates = df[df["fundingTime"] <= current_time]
+                
+                if not past_rates.empty:
+                    # 取最新的一条
+                    latest_rate = past_rates.iloc[-1]
+                    rate = float(latest_rate["fundingRate"])
+                    funding_time = int(latest_rate["fundingTime"])
+                    
+                    self.logger().debug(
+                        f"✅ Using historical funding rate for {trading_pair}: "
+                        f"{rate*100:.4f}% at {pd.to_datetime(funding_time, unit='s')}"
+                    )
+                    
+                    return {
+                        "rate": rate,
+                        "next_funding_time": funding_time + 28800,  # 8小时后
+                    }
+                else:
+                    self.logger().warning(
+                        f"No historical funding rate found for {trading_pair} at time {current_time}, "
+                        f"available range: {df['fundingTime'].min()} - {df['fundingTime'].max()}"
+                    )
+            
+            # 方法 2: 使用 market_data_provider (实盘环境)
             if hasattr(self, 'market_data_provider') and self.market_data_provider:
                 try:
                     funding_info = self.market_data_provider.get_funding_info(
@@ -528,29 +677,38 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                         trading_pair
                     )
                     if funding_info:
+                        self.logger().info(
+                            f"✅ Got funding rate for {trading_pair}: {float(funding_info.rate)*100:.4f}%"
+                        )
                         return {
                             "rate": float(funding_info.rate),
                             "next_funding_time": funding_info.next_funding_utc_timestamp,
                         }
                 except Exception as e:
-                    self.logger().warning(f"market_data_provider.get_funding_info failed for {trading_pair}: {e}")
+                    self.logger().debug(f"market_data_provider.get_funding_info failed for {trading_pair}: {e}")
             
-            # 方法 2: 直接从 connector 获取 (仅实盘可用)
+            # 方法 3: 直接从 connector 获取 (实盘环境备选)
             if hasattr(self, 'connectors') and self.connectors:
                 connector = self.connectors.get(self.config.connector_name)
                 if connector and hasattr(connector, 'get_funding_info'):
                     try:
                         funding_info = connector.get_funding_info(trading_pair)
                         if funding_info:
+                            self.logger().info(
+                                f"✅ Got funding rate for {trading_pair}: {float(funding_info.rate)*100:.4f}%"
+                            )
                             return {
                                 "rate": float(funding_info.rate),
                                 "next_funding_time": funding_info.next_funding_utc_timestamp,
                             }
                     except Exception as e:
-                        self.logger().warning(f"connector.get_funding_info failed for {trading_pair}: {e}")
+                        self.logger().debug(f"connector.get_funding_info failed for {trading_pair}: {e}")
             
-            # 方法 3: 回测环境或无法获取，返回默认值
-            self.logger().warning(f"Funding info not available for {trading_pair}, using default (backtest mode)")
+            # 方法 4: 回测环境或无法获取，返回默认值
+            # 回测引擎使用离线数据，无法获取实时 funding rate
+            self.logger().debug(
+                f"Funding rate not available for {trading_pair}. Using default neutral rate (0.0%)"
+            )
             return {"rate": 0.0, "next_funding_time": 0}
                 
         except Exception as e:
@@ -568,7 +726,7 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             user_prompt = self._build_user_prompt(context)
             
 
-            self.logger().warning(f"System prompt: {system_prompt}")
+            # self.logger().warning(f"System prompt: {system_prompt}")
             self.logger().warning(f"User prompt: {user_prompt}")
         
             
@@ -684,6 +842,7 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
 2. **Require multiple confirmations (NOT single indicators)**
    - Trend alignment: Price vs EMA
    - Momentum confirmation: MACD direction + histogram expansion
+   - Volume confirmation: Increasing volume supports trend validity
    - Sentiment check: RSI NOT in extreme (avoid overbought longs, oversold shorts)
    - Entry timing: Pullback to support (long) or resistance (short)
 
@@ -703,6 +862,7 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
 - [ ] Price > EMA(20) (uptrend confirmed)
 - [ ] MACD > Signal AND histogram expanding (bullish momentum)
 - [ ] RSI 40-70 (NOT oversold, healthy pullback)
+- [ ] Volume increasing or above average (confirms buying interest)
 - [ ] Price pulled back to support or EMA (entry opportunity)
 - [ ] Clear stop loss below recent swing low
 - [ ] R/R ratio ≥ 2:1
@@ -711,6 +871,7 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
 - [ ] Price < EMA(20) (downtrend confirmed)
 - [ ] MACD < Signal AND histogram expanding down (bearish momentum)
 - [ ] RSI 30-60 (NOT overbought, healthy bounce)
+- [ ] Volume increasing or above average (confirms selling pressure)
 - [ ] Price rallied to resistance or EMA (entry opportunity)
 - [ ] Clear stop loss above recent swing high
 - [ ] R/R ratio ≥ 2:1
@@ -828,6 +989,7 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
             price_hist = data.get('price_history', [])
             rsi_hist = data.get('rsi_history', [])
             macd_hist = data.get('macd_history', [])
+            volume_hist = data.get('volume_history', [])
             
             prompt_parts.append(
                 f"\n## {symbol}{data_warning}"
@@ -852,6 +1014,49 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
                     prompt_parts.append(f"- Trend: UPTREND (Price > EMA)")
                 else:
                     prompt_parts.append(f"- Trend: DOWNTREND (Price < EMA)")
+            
+            # 🔑 新增：成交量信息
+            prompt_parts.append(f"\n**Volume:**")
+            if volume_hist and len(volume_hist) >= 2:
+                # 格式化成交量（使用 K, M, B 单位）
+                def format_volume(vol):
+                    if vol >= 1e9:
+                        return f"{vol/1e9:.2f}B"
+                    elif vol >= 1e6:
+                        return f"{vol/1e6:.2f}M"
+                    elif vol >= 1e3:
+                        return f"{vol/1e3:.2f}K"
+                    else:
+                        return f"{vol:.2f}"
+                
+                volume_trend_str = " → ".join([format_volume(v) for v in volume_hist])
+                
+                # 计算成交量变化
+                volume_change = ((volume_hist[-1] - volume_hist[0]) / volume_hist[0]) * 100 if volume_hist[0] > 0 else 0
+                
+                # 判断成交量趋势
+                if volume_change > 20:
+                    volume_emoji = "📈"
+                    volume_trend = "Increasing (strong interest)"
+                elif volume_change < -20:
+                    volume_emoji = "📉"
+                    volume_trend = "Decreasing (weak interest)"
+                else:
+                    volume_emoji = "➡️"
+                    volume_trend = "Stable"
+                
+                prompt_parts.append(f"- Recent Volume: {volume_trend_str} {volume_emoji}")
+                prompt_parts.append(f"  → {volume_trend}")
+                
+                # 比较当前成交量与平均值
+                current_vol = volume_hist[-1]
+                avg_vol = data.get('avg_volume', current_vol)
+                if current_vol > avg_vol * 1.5:
+                    prompt_parts.append(f"  → Above average (strong confirmation)")
+                elif current_vol < avg_vol * 0.5:
+                    prompt_parts.append(f"  → Below average (weak confirmation)")
+                else:
+                    prompt_parts.append(f"  → Near average")
             
             prompt_parts.append(f"\n**Technical Indicators:**")
             
@@ -887,9 +1092,10 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
                 else:
                     prompt_parts.append(f"  → Bearish momentum (MACD < Signal)")
             
-            # 🔧 修复：总是显示 funding rate（即使是 0.0）
+            # 显示 funding rate（回测和实盘都支持）
             if "_perpetual" in self.config.connector_name:
-                if funding_info:  # 如果有 funding_info 字典（即使 rate 为 0）
+                if funding_info and funding_rate != 0.0:
+                    # 有真实数据（实盘或回测历史数据）
                     prompt_parts.append(
                         f"\n**Funding Rate:** {funding_rate*100:.4f}% (8h)"
                     )
@@ -898,10 +1104,16 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
                     elif funding_rate < -0.0001:
                         prompt_parts.append(f"  → Bearish sentiment (shorts paying longs)")
                     else:
-                        prompt_parts.append(f"  → Neutral sentiment (balanced or backtest mode)")
+                        prompt_parts.append(f"  → Neutral sentiment")
+                elif funding_info:
+                    # 有 funding_info 但 rate 为 0（可能是真实的 0 或默认值）
+                    prompt_parts.append(
+                        f"\n**Funding Rate:** {funding_rate*100:.4f}% (8h)"
+                    )
+                    prompt_parts.append(f"  → Neutral sentiment")
                 else:
-                    # 回测模式下没有获取到 funding rate
-                    prompt_parts.append(f"\n**Funding Rate:** Not available (backtest mode)")
+                    # 完全没有数据
+                    prompt_parts.append(f"\n**Funding Rate:** Not available")
         
         # 4. 历史交易记录
         if context["recent_trades"]:
