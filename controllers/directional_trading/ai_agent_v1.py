@@ -278,8 +278,21 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
     
     def _get_account_summary(self) -> Dict:
         """获取账户摘要"""
+        # 计算当前持仓总价值
+        current_holdings = float(self.config.total_amount_quote)  # 初始资本
+        
+        # 加上所有活跃持仓的PnL
+        for executor in self.executors_info:
+            if executor.is_active and executor.is_trading:
+                try:
+                    current_holdings += float(executor.net_pnl_quote)
+                except Exception as e:
+                    self.logger().warning(f"Error calculating PnL for executor {executor.id}: {e}")
+        
         return {
-            "total_amount_quote": float(self.config.total_amount_quote),
+            "total_amount_quote": float(self.config.total_amount_quote),  # 初始资本
+            "current_holdings": current_holdings,  # 当前账户总价值
+            "total_pnl": current_holdings - float(self.config.total_amount_quote),  # 总盈亏
             "max_concurrent_positions": self.config.max_concurrent_positions,
             "single_position_size_pct": float(self.config.single_position_size_pct),
         }
@@ -557,23 +570,30 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
 **Respond ONLY with a JSON array. No extra text.**
 
 Required fields for each decision:
-- **reasoning** (string): Brief analysis (1-2 sentences)
+- **reasoning** (string): **DETAILED multi-step analysis (4-6 sentences minimum)**
+  Must include:
+  1. Market context & trend identification (what's happening)
+  2. Technical confluence (which indicators align/conflict)
+  3. Risk/Reward calculation (entry, SL, TP levels with rationale)
+  4. Thesis & invalidation point (what you expect & when to exit)
+  5. Why NOW is the right time (or why NOT)
+  
 - **action** (string): "open_long" | "open_short" | "close_position" | "hold"
 - **symbol** (string): Trading pair (e.g., "BTC-USDT") or null
 - **stop_loss_pct** (float): 0.015-0.035 (1.5%-3.5%) or null
-- **take_profit_pct** (float): 0.03-0.08 (3%-8%, min 1.5:1 R/R) or null
-- **confidence** (int): 0-100 (0 for hold, 30+ to trade)
+- **take_profit_pct** (float): 0.03-0.08 (3%-8%, min 2:1 R/R) or null
+- **confidence** (int): 0-100 (0 for hold, 50+ to trade)
 
 **Example:**
 ```json
 [
   {
-    "reasoning": "",
-    "action": "",
-    "symbol": "",
-    "stop_loss_pct": 0.025,
-    "take_profit_pct": 0.05,
-    "confidence": 0
+    "reasoning": "BTC-USDT shows a clear uptrend with price at $50,200 holding above EMA(20) at $49,800, confirming bullish structure. MACD histogram is expanding positively (0.45 → 0.52 → 0.61), indicating strengthening momentum. RSI at 58 is healthy (not overbought), suggesting room for continuation. Price has pulled back from $50,500 to $50,200, forming a higher low near the EMA, which is a textbook long entry. Stop loss at $49,500 (below EMA and recent swing low) gives 1.4% risk. Take profit at $51,800 (resistance level) offers 3.2% reward, yielding 2.3:1 R/R. This setup meets all checklist criteria with strong trend, momentum, and structure confluence.",
+    "action": "open_long",
+    "symbol": "BTC-USDT",
+    "stop_loss_pct": 0.014,
+    "take_profit_pct": 0.032,
+    "confidence": 75
   }
 ]
 ```
@@ -704,7 +724,14 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
         
         # 1. 账户信息
         prompt_parts.append(f"# ACCOUNT STATUS")
-        prompt_parts.append(f"Total Capital: ${context['account']['total_amount_quote']:.2f}")
+        prompt_parts.append(f"Initial Capital: ${context['account']['total_amount_quote']:.2f}")
+        prompt_parts.append(f"Current Holdings: ${context['account']['current_holdings']:.2f}")
+        
+        total_pnl = context['account']['total_pnl']
+        pnl_pct = (total_pnl / context['account']['total_amount_quote']) * 100
+        pnl_emoji = "📈" if total_pnl > 0 else "📉" if total_pnl < 0 else "➖"
+        prompt_parts.append(f"Total P&L: ${total_pnl:.2f} ({pnl_pct:+.2f}%) {pnl_emoji}")
+        
         prompt_parts.append(f"Active Positions: {len(context['positions'])}/{self.config.max_concurrent_positions}")
         prompt_parts.append(f"Available Slots: {self.config.max_concurrent_positions - len(context['positions'])}")
         
@@ -1179,6 +1206,12 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
                         self.logger().info(f"   ✅ Created CLOSE action for {symbol}")
                     else:
                         self.logger().warning(f"   ⚠️  Failed to create CLOSE action for {symbol}")
+                        
+                elif action_type == "hold":
+                    # Hold 动作不需要创建任何 action，只记录日志
+                    reasoning = decision.get("reasoning", "No reasoning provided")
+                    self.logger().info(f"   ⏸️  HOLD decision: {reasoning}")
+                    
                 else:
                     self.logger().warning(f"   ⚠️  Unknown action type: {action_type}")
                         
