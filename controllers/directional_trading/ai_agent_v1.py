@@ -284,21 +284,45 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
     
     def _get_account_summary(self) -> Dict:
         """获取账户摘要"""
-        # 计算当前持仓总价值
-        current_holdings = float(self.config.total_amount_quote)  # 初始资本
+        # 计算当前持仓总价值 = 初始资本 + 所有已结束交易的盈亏 + 当前活跃持仓的未实现盈亏
+        initial_capital = float(self.config.total_amount_quote)
+        current_holdings = initial_capital
         
-        # 加上所有活跃持仓的PnL
+        # 统计已结束交易的累计盈亏
+        closed_pnl = 0.0
+        active_pnl = 0.0
+        
         for executor in self.executors_info:
-            if executor.is_active and executor.is_trading:
-                try:
-                    current_holdings += float(executor.net_pnl_quote)
-                except Exception as e:
-                    self.logger().warning(f"Error calculating PnL for executor {executor.id}: {e}")
+            try:
+                # 已结束的交易（已实现盈亏）
+                if hasattr(executor, 'status') and str(executor.status) == 'RunnableStatus.TERMINATED':
+                    if hasattr(executor, 'net_pnl_quote') and executor.net_pnl_quote is not None:
+                        pnl = float(executor.net_pnl_quote)
+                        closed_pnl += pnl
+                        self.logger().debug(f"Closed executor {executor.id}: PnL ${pnl:.2f}")
+                
+                # 活跃持仓（未实现盈亏）
+                elif executor.is_active and executor.is_trading:
+                    if hasattr(executor, 'net_pnl_quote') and executor.net_pnl_quote is not None:
+                        pnl = float(executor.net_pnl_quote)
+                        active_pnl += pnl
+                        self.logger().debug(f"Active executor {executor.id}: PnL ${pnl:.2f}")
+                        
+            except Exception as e:
+                self.logger().warning(f"Error calculating PnL for executor {executor.id}: {e}")
+        
+        # 当前账户总价值 = 初始资本 + 已实现盈亏 + 未实现盈亏
+        current_holdings = initial_capital + closed_pnl + active_pnl
+        total_pnl = current_holdings - initial_capital
+        
+        self.logger().info(f"Account Summary: Initial=${initial_capital:.2f}, Closed PnL=${closed_pnl:.2f}, Active PnL=${active_pnl:.2f}, Total=${current_holdings:.2f}")
         
         return {
-            "total_amount_quote": float(self.config.total_amount_quote),  # 初始资本
+            "total_amount_quote": initial_capital,  # 初始资本
             "current_holdings": current_holdings,  # 当前账户总价值
-            "total_pnl": current_holdings - float(self.config.total_amount_quote),  # 总盈亏
+            "total_pnl": total_pnl,  # 总盈亏（已实现 + 未实现）
+            "closed_pnl": closed_pnl,  # 已实现盈亏
+            "active_pnl": active_pnl,  # 未实现盈亏
             "max_concurrent_positions": self.config.max_concurrent_positions,
             "single_position_size_pct": float(self.config.single_position_size_pct),
         }
@@ -738,10 +762,16 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
         prompt_parts.append(f"Initial Capital: ${context['account']['total_amount_quote']:.2f}")
         prompt_parts.append(f"Current Holdings: ${context['account']['current_holdings']:.2f}")
         
+        # 分解盈亏显示
         total_pnl = context['account']['total_pnl']
+        closed_pnl = context['account'].get('closed_pnl', 0.0)
+        active_pnl = context['account'].get('active_pnl', 0.0)
         pnl_pct = (total_pnl / context['account']['total_amount_quote']) * 100
         pnl_emoji = "📈" if total_pnl > 0 else "📉" if total_pnl < 0 else "➖"
+        
         prompt_parts.append(f"Total P&L: ${total_pnl:.2f} ({pnl_pct:+.2f}%) {pnl_emoji}")
+        prompt_parts.append(f"  - Realized P&L (Closed): ${closed_pnl:.2f}")
+        prompt_parts.append(f"  - Unrealized P&L (Active): ${active_pnl:.2f}")
         
         prompt_parts.append(f"Active Positions: {len(context['positions'])}/{self.config.max_concurrent_positions}")
         prompt_parts.append(f"Available Slots: {self.config.max_concurrent_positions - len(context['positions'])}")
