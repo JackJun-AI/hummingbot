@@ -299,18 +299,41 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         
         从 executors_info 中提取已完成的交易
         """
-        closed_executors = [
-            {
+        closed_executors = []
+        
+        for e in self.executors_info:
+            if not (hasattr(e, 'status') and str(e.status) == 'RunnableStatus.TERMINATED'):
+                continue
+            
+            # 获取入场价格
+            entry_price = 0.0
+            if hasattr(e, 'entry_price') and e.entry_price:
+                entry_price = float(e.entry_price)
+            elif hasattr(e, 'config') and hasattr(e.config, 'entry_price'):
+                entry_price = float(e.config.entry_price)
+            
+            # 计算退出价格（基于 PnL）
+            exit_price = 0.0
+            if entry_price > 0 and hasattr(e, 'net_pnl_pct') and e.net_pnl_pct:
+                pnl_pct = float(e.net_pnl_pct)
+                side_multiplier = 1 if e.config.side.name == "BUY" else -1
+                # exit_price = entry_price * (1 + pnl_pct * side_multiplier)
+                # 简化：直接根据 PnL 百分比计算
+                exit_price = entry_price * (1 + pnl_pct * side_multiplier)
+            
+            trade = {
                 "symbol": e.config.trading_pair,
                 "side": e.config.side.name,
-                "entry_price": float(e.entry_price) if hasattr(e, 'entry_price') else 0,
+                "entry_price": entry_price,
+                "exit_price": exit_price,  # 🔧 添加退出价格
                 "pnl_pct": float(e.net_pnl_pct) if hasattr(e, 'net_pnl_pct') else 0,
                 "pnl_quote": float(e.net_pnl_quote) if hasattr(e, 'net_pnl_quote') else 0,
+                "close_type": e.close_type.name if hasattr(e, 'close_type') and e.close_type else "UNKNOWN",
                 "timestamp": e.timestamp if hasattr(e, 'timestamp') else 0,
+                "close_timestamp": e.close_timestamp if hasattr(e, 'close_timestamp') else 0,
             }
-            for e in self.executors_info
-            if hasattr(e, 'status') and str(e.status) == 'RunnableStatus.TERMINATED'
-        ]
+            closed_executors.append(trade)
+        
         return closed_executors[-limit:] if closed_executors else []
     
     async def _get_market_info(self, trading_pair: str) -> Dict:
@@ -543,10 +566,19 @@ You must respond with a JSON array in this exact format:
         if context["recent_trades"]:
             prompt_parts.append(f"\n## Recent Trades (Last {len(context['recent_trades'])})")
             for trade in context["recent_trades"]:
+                # 计算持仓时长
+                duration_hours = 0
+                if trade['close_timestamp'] and trade['timestamp']:
+                    duration_hours = (trade['close_timestamp'] - trade['timestamp']) / 3600
+                
+                # 格式化交易信息
+                pnl_emoji = "✅" if trade['pnl_quote'] > 0 else "❌"
                 prompt_parts.append(
                     f"- {trade['symbol']} {trade['side']}: "
                     f"Entry ${trade['entry_price']:.2f} → Exit ${trade['exit_price']:.2f}, "
-                    f"PnL: {trade['pnl_pct']*100:.2f}%"
+                    f"PnL: {trade['pnl_pct']*100:.2f}% (${trade['pnl_quote']:.2f}) {pnl_emoji}, "
+                    f"Close: {trade['close_type']}, "
+                    f"Duration: {duration_hours:.1f}h"
                 )
         
         prompt_parts.append(f"\n## Your Decision:")
