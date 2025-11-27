@@ -687,66 +687,24 @@ For EVERY trade, you must specify:
 
 # OUTPUT FORMAT
 
-You must respond with a JSON array. **ALWAYS start with your reasoning, then decide.**
+**CRITICAL: You must respond ONLY with a JSON array. No extra text.**
 
-Format:
-```json
-[
-  {{
-    "reasoning": "BTC shows strong bullish divergence: RSI recovering from oversold (<30), MACD bullish crossover, price above EMA(20) at $42,500. Funding rate is neutral. Risk/reward is 1:2 with stop at $41,800 (-2.5%) and target at $44,200 (+4%). High confidence setup.",
-    "action": "open_long",
-    "symbol": "BTC-USDT",
-    "stop_loss_pct": 0.025,
-    "take_profit_pct": 0.05,
-    "confidence": 75
-  }}
-]
-```
+Each decision must have these fields:
+1. **reasoning** (string): Brief analysis (1-2 sentences)
+2. **action** (string): One of: "open_long", "open_short", "close_position", "hold"
+3. **symbol** (string): Trading pair (e.g., "BTC-USDT") or null for "hold"
+4. **stop_loss_pct** (float): Stop loss percentage (e.g., 0.025 for 2.5%) or null
+5. **take_profit_pct** (float): Take profit percentage (e.g., 0.05 for 5%) or null
+6. **confidence** (int): 0-100 or 0 for "hold"
 
-**If no clear opportunity exists, return:**
-```json
-[
-  {{
-    "reasoning": "Market conditions are unclear. BTC range-bound with RSI neutral at 50, MACD flat. No clear directional bias. Waiting for better setup.",
-    "action": "hold",
-    "symbol": null,
-    "stop_loss_pct": null,
-    "take_profit_pct": null,
-    "confidence": 0
-  }}
-]
-```
-
+**IMPORTANT:**
+- reasoning: Keep it brief and focused
+- action: Exactly one of the 4 actions above
+- Always return a JSON array, even for single decision
+- No nested objects in reasoning (just a string)
 ---
 
-# TRADING PHILOSOPHY
-
-**Core Principles:**
-1. **Capital Preservation First**: Protecting capital > chasing gains
-2. **Discipline Over Emotion**: Follow your plan, don't move stops
-3. **Quality Over Quantity**: Fewer high-conviction trades beat many random trades
-4. **Respect the Trend**: Don't fight strong directional moves
-5. **Learn from History**: Review recent trades to avoid repeated mistakes
-
-**Common Pitfalls to Avoid:**
-- ⚠️ Overtrading: Excessive trading erodes capital through fees
-- ⚠️ Revenge Trading: Don't increase size after losses
-- ⚠️ Analysis Paralysis: Don't wait for perfect setups
-- ⚠️ Ignoring Risk: Always set stops, never "hope" for recovery
-
----
-
-# FINAL INSTRUCTIONS
-
-1. **Think before acting**: Analyze thoroughly before deciding
-2. **Be honest about confidence**: Don't overstate conviction
-3. **Provide detailed reasoning**: Explain your technical analysis
-4. **Respect risk management**: Always set proper stops and targets
-5. **Don't force trades**: It's OK to wait for better opportunities
-
-Remember: Consistent, disciplined trading beats aggressive speculation. Focus on high-probability setups with favorable risk/reward.
-
-Now analyze the market data and make your decision.
+Now analyze the market data and respond with ONLY the JSON array.
 """
     
     def _build_user_prompt(self, context: Dict) -> str:
@@ -904,29 +862,7 @@ Now analyze the market data and make your decision.
                     f"Duration: {duration_hours:.1f}h"
                 )
         
-        # 5. 决策指令
-        prompt_parts.append(f"\n# YOUR DECISION")
-        
-        prompt_parts.append(
-            f"\nBased on the above data, make your trading decision following these steps:\n"
-            f"\n**Step 1: Analyze Current Positions**"
-            f"\n- Should any existing positions be closed?"
-            f"\n- Are they performing as expected?"
-            f"\n\n**Step 2: Evaluate Market Conditions**"
-            f"\n- What is the overall trend for each pair?"
-            f"\n- Are there any clear technical setups?"
-            f"\n- What is the risk/reward ratio?"
-            f"\n\n**Step 3: Make Decision**"
-            f"\n- If clear opportunity exists → Open position"
-            f"\n- If existing position should exit → Close position"
-            f"\n- If no clear edge → Hold/Wait"
-            f"\n\n**Remember:**"
-            f"\n- Quality over quantity (don't force trades)"
-            f"\n- Always start with reasoning before deciding"
-            f"\n- Set appropriate stop loss and take profit"
-            f"\n- Be honest about your confidence level"
-        )
-        
+        # 5. 决策指令 - 简化版
         prompt_parts.append(f"\n\nProvide your decision in JSON format.")
         
         return "\n".join(prompt_parts)
@@ -990,20 +926,51 @@ Now analyze the market data and make your decision.
                 self.logger().warning("AI response is not a list, wrapping it")
                 decisions = [decisions] if decisions else []
             
-            # 🔧 修复：兼容 "decision" 和 "action" 字段名
-            # 有些 LLM 可能返回 "decision": "wait" 而不是 "action": "hold"
+            # 🔧 修复：兼容多种字段名和值的变体
             normalized_decisions = []
             for dec in decisions:
-                # 规范化决策对象
+                # 1. 规范化 action 字段名
                 if "decision" in dec and "action" not in dec:
-                    # 转换：decision -> action
                     dec["action"] = dec.pop("decision")
                     self.logger().debug(f"Normalized 'decision' field to 'action': {dec.get('action')}")
                 
-                # 规范化 action 值
-                if dec.get("action") == "wait":
-                    dec["action"] = "hold"
-                    self.logger().debug("Normalized 'wait' action to 'hold'")
+                # 2. 规范化 action 值（统一小写，处理各种变体）
+                action = dec.get("action", "").lower().replace("/", "_").replace(" ", "_")
+                
+                # 映射各种变体到标准 action
+                action_mapping = {
+                    "wait": "hold",
+                    "hold_wait": "hold",
+                    "do_nothing": "hold",
+                    "long": "open_long",
+                    "short": "open_short",
+                    "buy": "open_long",
+                    "sell": "open_short",
+                    "close": "close_position",
+                    "exit": "close_position",
+                }
+                
+                if action in action_mapping:
+                    original_action = dec.get("action")
+                    dec["action"] = action_mapping[action]
+                    self.logger().debug(f"Normalized action: '{original_action}' -> '{dec['action']}'")
+                else:
+                    dec["action"] = action
+                
+                # 3. 确保 reasoning 是字符串
+                reasoning = dec.get("reasoning", "")
+                if isinstance(reasoning, dict):
+                    # 如果 reasoning 是字典，转换为简洁的文本
+                    reasoning_parts = []
+                    for key, value in reasoning.items():
+                        if isinstance(value, dict):
+                            # 进一步展开嵌套字典
+                            for k, v in value.items():
+                                reasoning_parts.append(f"{k}: {v}")
+                        else:
+                            reasoning_parts.append(f"{key}: {value}")
+                    dec["reasoning"] = ". ".join(reasoning_parts)
+                    self.logger().debug(f"Converted dict reasoning to string: {dec['reasoning'][:100]}...")
                 
                 normalized_decisions.append(dec)
             
@@ -1013,7 +980,8 @@ Now analyze the market data and make your decision.
             for i, dec in enumerate(normalized_decisions, 1):
                 action = dec.get("action", "unknown")
                 symbol = dec.get("symbol", "N/A")
-                self.logger().debug(f"Decision {i}: action={action}, symbol={symbol}")
+                reasoning_preview = str(dec.get("reasoning", ""))[:50]
+                self.logger().debug(f"Decision {i}: action={action}, symbol={symbol}, reasoning={reasoning_preview}...")
             
             return normalized_decisions
             
