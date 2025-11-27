@@ -264,8 +264,14 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 
                 # 获取资金费率（仅 Perpetual）
                 if "_perpetual" in self.config.connector_name:
-                    funding_rate = await self._get_funding_rate(pair)
-                    context["funding_rates"][pair] = funding_rate
+                    try:
+                        funding_rate = await self._get_funding_rate(pair)
+                        context["funding_rates"][pair] = funding_rate
+                        self.logger().debug(f"✅ {pair}: Funding rate {funding_rate.get('rate', 0)*100:.4f}%")
+                    except Exception as e:
+                        self.logger().warning(f"⚠️  Failed to get funding rate for {pair}: {e}")
+                        # 即使失败也要设置默认值，确保 context 中有这个字段
+                        context["funding_rates"][pair] = {"rate": 0.0, "next_funding_time": 0}
                     
             except Exception as e:
                 self.logger().error(f"❌ Failed to get market info for {pair}: {e}", exc_info=True)
@@ -491,35 +497,40 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         """获取资金费率（仅 Perpetual 合约）"""
         try:
             # 方法 1: 使用 market_data_provider (推荐，适用于实盘和回测)
-            if hasattr(self, 'market_data_provider'):
+            if hasattr(self, 'market_data_provider') and self.market_data_provider:
                 try:
                     funding_info = self.market_data_provider.get_funding_info(
                         self.config.connector_name, 
                         trading_pair
                     )
-                    return {
-                        "rate": float(funding_info.rate),
-                        "next_funding_time": funding_info.next_funding_utc_timestamp,
-                    }
+                    if funding_info:
+                        return {
+                            "rate": float(funding_info.rate),
+                            "next_funding_time": funding_info.next_funding_utc_timestamp,
+                        }
                 except Exception as e:
-                    self.logger().debug(f"market_data_provider.get_funding_info failed for {trading_pair}: {e}")
+                    self.logger().warning(f"market_data_provider.get_funding_info failed for {trading_pair}: {e}")
             
             # 方法 2: 直接从 connector 获取 (仅实盘可用)
-            if hasattr(self, 'connectors'):
+            if hasattr(self, 'connectors') and self.connectors:
                 connector = self.connectors.get(self.config.connector_name)
                 if connector and hasattr(connector, 'get_funding_info'):
-                    funding_info = connector.get_funding_info(trading_pair)
-                    return {
-                        "rate": float(funding_info.rate),
-                        "next_funding_time": funding_info.next_funding_utc_timestamp,
-                    }
+                    try:
+                        funding_info = connector.get_funding_info(trading_pair)
+                        if funding_info:
+                            return {
+                                "rate": float(funding_info.rate),
+                                "next_funding_time": funding_info.next_funding_utc_timestamp,
+                            }
+                    except Exception as e:
+                        self.logger().warning(f"connector.get_funding_info failed for {trading_pair}: {e}")
             
-            # 方法 3: 回测环境，返回默认值
-            self.logger().debug(f"Funding info not available for {trading_pair} (backtest mode)")
+            # 方法 3: 回测环境或无法获取，返回默认值
+            self.logger().warning(f"Funding info not available for {trading_pair}, using default (backtest mode)")
             return {"rate": 0.0, "next_funding_time": 0}
                 
         except Exception as e:
-            self.logger().debug(f"Failed to get funding rate for {trading_pair}: {e}")
+            self.logger().error(f"Failed to get funding rate for {trading_pair}: {e}")
             return {"rate": 0.0, "next_funding_time": 0}
     
     async def _get_ai_decisions(self, context: Dict) -> List[Dict]:
@@ -846,16 +857,21 @@ Your mission: Maximize risk-adjusted returns through disciplined trading decisio
                 else:
                     prompt_parts.append(f"  → Bearish momentum (MACD < Signal)")
             
-            if funding_rate:
-                prompt_parts.append(
-                    f"\n**Funding Rate:** {funding_rate*100:.4f}% (8h)"
-                )
-                if funding_rate > 0.0001:
-                    prompt_parts.append(f"  → Bullish sentiment (longs paying shorts)")
-                elif funding_rate < -0.0001:
-                    prompt_parts.append(f"  → Bearish sentiment (shorts paying longs)")
+            # 🔧 修复：总是显示 funding rate（即使是 0.0）
+            if "_perpetual" in self.config.connector_name:
+                if funding_info:  # 如果有 funding_info 字典（即使 rate 为 0）
+                    prompt_parts.append(
+                        f"\n**Funding Rate:** {funding_rate*100:.4f}% (8h)"
+                    )
+                    if funding_rate > 0.0001:
+                        prompt_parts.append(f"  → Bullish sentiment (longs paying shorts)")
+                    elif funding_rate < -0.0001:
+                        prompt_parts.append(f"  → Bearish sentiment (shorts paying longs)")
+                    else:
+                        prompt_parts.append(f"  → Neutral sentiment (balanced or backtest mode)")
                 else:
-                    prompt_parts.append(f"  → Neutral sentiment)")
+                    # 回测模式下没有获取到 funding rate
+                    prompt_parts.append(f"\n**Funding Rate:** Not available (backtest mode)")
         
         # 4. 历史交易记录
         if context["recent_trades"]:
