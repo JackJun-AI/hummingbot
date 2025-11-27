@@ -768,19 +768,9 @@ You must respond with a JSON array in this exact format:
         )
         self.logger().info("=" * 80)
         
-        # 同步执行 AI 决策（回测环境）
+        # 🔧 修复：同步执行 AI 决策（避免事件循环冲突）
         try:
-            import asyncio
-            
-            # 检查事件循环状态
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            # 执行 AI 决策
-            ai_decisions = loop.run_until_complete(self._execute_ai_decision_cycle())
+            ai_decisions = self._execute_ai_decision_cycle_sync()
             
         except Exception as e:
             self.logger().error(f"❌ AI decision cycle failed: {e}", exc_info=True)
@@ -838,9 +828,43 @@ You must respond with a JSON array in this exact format:
         # 过滤掉 None（安全检查）
         return [action for action in actions if action is not None]
     
+    def _execute_ai_decision_cycle_sync(self) -> List[Dict]:
+        """
+        同步执行 AI 决策流程（避免事件循环冲突）
+        
+        🔧 修复：使用同步包装来避免 "event loop already running" 错误
+        """
+        import asyncio
+        
+        try:
+            # 方法 1：检测是否有运行中的事件循环
+            try:
+                loop = asyncio.get_running_loop()
+                # 如果有运行中的循环，使用 asyncio.create_task
+                # 但在同步函数中无法直接 await，所以使用一个特殊方法
+                self.logger().debug("Detected running event loop, using sync wrapper")
+                
+                # 创建新的事件循环在线程中运行（避免冲突）
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        asyncio.run, 
+                        self._execute_ai_decision_cycle()
+                    )
+                    return future.result(timeout=30)  # 30秒超时
+                    
+            except RuntimeError:
+                # 没有运行中的循环，直接运行
+                self.logger().debug("No running event loop, using asyncio.run()")
+                return asyncio.run(self._execute_ai_decision_cycle())
+                
+        except Exception as e:
+            self.logger().error(f"Failed to execute AI decision cycle: {e}", exc_info=True)
+            return []
+    
     async def _execute_ai_decision_cycle(self) -> List[Dict]:
         """
-        执行完整的 AI 决策流程（回测和实盘通用）
+        执行完整的 AI 决策流程（异步版本）
         """
         try:
             # Step 1: 构建上下文
