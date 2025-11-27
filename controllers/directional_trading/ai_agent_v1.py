@@ -430,8 +430,8 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             system_prompt = self._build_system_prompt()
             user_prompt = self._build_user_prompt(context)
             
-            self.logger().info(f"System prompt length: {len(system_prompt)} chars")
-            self.logger().info(f"User prompt length: {len(user_prompt)} chars")
+            self.logger().warning(f"System prompt length: {len(system_prompt)} chars")
+            self.logger().warning(f"User prompt length: {len(user_prompt)} chars")
             
             # 打印 User Prompt 的前 500 字符用于调试
             self.logger().info(f"User prompt preview:\n{user_prompt[:500]}...")
@@ -442,7 +442,7 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             self.logger().info("LLM response received")
             
             # 打印完整响应用于调试
-            self.logger().info(f"LLM full response:\n{response}")
+            self.logger().warning(f"LLM full response:\n{response}")
             
             # Step 3: 解析决策
             self.logger().debug("Parsing LLM response...")
