@@ -247,10 +247,20 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
         }
         
         # 收集每个币种的市场数据
+        self.logger().debug(f"Collecting market data for {len(self.config.trading_pairs)} pairs...")
+        
         for pair in self.config.trading_pairs:
             try:
+                self.logger().debug(f"Getting market info for {pair}...")
                 market_info = await self._get_market_info(pair)
+                
+                # 🔧 即使有错误也要记录（便于调试）
                 context["market_data"][pair] = market_info
+                
+                if "error" in market_info:
+                    self.logger().warning(f"⚠️  {pair}: {market_info['error']}")
+                else:
+                    self.logger().debug(f"✅ {pair}: Price ${market_info.get('current_price', 0):.2f}")
                 
                 # 获取资金费率（仅 Perpetual）
                 if "_perpetual" in self.config.connector_name:
@@ -258,7 +268,11 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                     context["funding_rates"][pair] = funding_rate
                     
             except Exception as e:
-                self.logger().warning(f"Failed to get market info for {pair}: {e}")
+                self.logger().error(f"❌ Failed to get market info for {pair}: {e}", exc_info=True)
+                # 🔧 记录错误，而不是跳过
+                context["market_data"][pair] = {"error": str(e)}
+        
+        self.logger().info(f"Market data collected: {len(context['market_data'])} pairs")
         
         return context
     
@@ -339,6 +353,15 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
     async def _get_market_info(self, trading_pair: str) -> Dict:
         """获取单个币种的市场信息"""
         try:
+            self.logger().debug(f"Fetching candles for {trading_pair}...")
+            self.logger().debug(f"  Connector: {self.config.connector_name}")
+            self.logger().debug(f"  Interval: {self.config.interval}")
+            self.logger().debug(f"  Max records: {self.config.candles_max_records}")
+            
+            # 🔧 调试：检查 market_data_provider 中是否有这个交易对的数据
+            available_keys = list(self.market_data_provider.candles_feeds.keys()) if hasattr(self.market_data_provider, 'candles_feeds') else []
+            self.logger().debug(f"  Available candles feeds: {available_keys}")
+            
             # 获取K线数据
             candles = self.market_data_provider.get_candles_df(
                 connector_name=self.config.connector_name,
@@ -347,14 +370,22 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 max_records=self.config.candles_max_records
             )
             
+            self.logger().debug(f"Received {len(candles) if not candles.empty else 0} candles for {trading_pair}")
+            
             if candles.empty or len(candles) < 20:
-                self.logger().warning(f"Insufficient candles for {trading_pair}")
-                return {"error": "insufficient_data"}
+                self.logger().warning(
+                    f"❌ Insufficient candles for {trading_pair}: {len(candles) if not candles.empty else 0} rows\n"
+                    f"   Available feeds: {available_keys}\n"
+                    f"   Looking for: {self.config.connector_name}_{trading_pair}_{self.config.interval}"
+                )
+                return {"error": "insufficient_data", "symbol": trading_pair, "candles_count": len(candles) if not candles.empty else 0}
             
             # 计算技术指标
             close = candles["close"]
             high = candles["high"]
             low = candles["low"]
+            
+            self.logger().debug(f"Calculating indicators for {trading_pair}...")
             
             rsi = ta.rsi(close, length=14)
             macd = ta.macd(close, fast=12, slow=26, signal=9)
@@ -362,7 +393,7 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             
             current_price = float(close.iloc[-1])
             
-            return {
+            market_info = {
                 "symbol": trading_pair,
                 "current_price": current_price,
                 "rsi": float(rsi.iloc[-1]) if not rsi.isna().iloc[-1] else None,
@@ -373,9 +404,17 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 "volume_24h": float(candles["volume"].sum()),
             }
             
+            self.logger().debug(
+                f"✅ {trading_pair}: Price=${current_price:.2f}, "
+                f"RSI={market_info['rsi']:.1f if market_info['rsi'] else 'N/A'}, "
+                f"MACD={market_info['macd']:.2f if market_info['macd'] else 'N/A'}"
+            )
+            
+            return market_info
+            
         except Exception as e:
-            self.logger().error(f"Error getting market info for {trading_pair}: {e}")
-            return {"error": str(e)}
+            self.logger().error(f"❌ Error getting market info for {trading_pair}: {e}", exc_info=True)
+            return {"error": str(e), "symbol": trading_pair}
     
     def _calculate_price_change(self, candles: pd.DataFrame) -> float:
         """计算24小时价格变化百分比"""
@@ -461,43 +500,143 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
     
     def _build_system_prompt(self) -> str:
         """构建系统 Prompt"""
-        return f"""You are an expert cryptocurrency trading AI agent with an active trading style.
+        return f"""You are an autonomous cryptocurrency trading agent with systematic, disciplined approach.
 
-**Trading Rules:**
-- You can trade these pairs: {', '.join(self.config.trading_pairs)}
-- Maximum concurrent positions: {self.config.max_concurrent_positions}
-- Single position size: {float(self.config.single_position_size_pct) * 100}% of total capital
-- Always use stop loss and take profit
-- Risk/Reward ratio must be at least 1:2
+# ROLE & MISSION
+Your mission: Maximize risk-adjusted returns through disciplined trading decisions based on technical analysis and risk management principles.
 
-**🔥 CRITICAL RULE - MUST FOLLOW:**
-- **IF YOU HAVE 0 ACTIVE POSITIONS, YOU MUST OPEN AT LEAST ONE POSITION**
-- Choose the trading pair with the best technical setup (RSI, MACD, price action)
-- Decide between LONG or SHORT based on market conditions
-- Even in unclear markets, you MUST take a position if you have none
+---
 
-**Trading Style:**
-- Be PROACTIVE and look for trading opportunities
-- Make at least 1 trade decision per cycle unless market conditions are extremely unfavorable
-- Use technical indicators (RSI, MACD, EMA) to identify entry points
-- Consider funding rates for perpetual contracts
-- Learn from historical trades to avoid repeated mistakes
-- Never stay idle when you have no positions
+# TRADING ENVIRONMENT
 
-**Available Actions:**
-1. "open_long" - Open a long position (do this when you see bullish signals)
-2. "open_short" - Open a short position (do this when you see bearish signals)
-3. "close_position" - Close an existing position
-4. "hold" - Take no action (ONLY use this if you already have active positions)
+## Your Trading Setup
+- **Exchange**: {self.config.connector_name}
+- **Available Pairs**: {', '.join(self.config.trading_pairs)}
+- **Max Concurrent Positions**: {self.config.max_concurrent_positions}
+- **Position Size**: {float(self.config.single_position_size_pct) * 100}% of capital per trade
+- **Base Stop Loss**: {float(self.config.triple_barrier_config.stop_loss) * 100}%
+- **Base Take Profit**: {float(self.config.triple_barrier_config.take_profit) * 100}%
+- **Max Hold Time**: {self.config.triple_barrier_config.time_limit / 3600:.1f} hours
 
-**Output Format:**
-You must respond with a JSON array in this exact format:
+## Market Type
+- **Perpetual Contracts**: No expiration, funding rate mechanism
+- **Funding Rate Impact**:
+  - Positive funding = Longs pay shorts (bullish sentiment)
+  - Negative funding = Shorts pay longs (bearish sentiment)
+  - Extreme funding rates (>0.01%) = Potential reversal signal
+
+---
+
+# AVAILABLE ACTIONS
+
+You have exactly FOUR possible actions:
+
+1. **open_long**: Open a LONG position (bet on price appreciation)
+   - Use when: Bullish technical setup, positive momentum, clear uptrend
+
+2. **open_short**: Open a SHORT position (bet on price depreciation)
+   - Use when: Bearish technical setup, negative momentum, clear downtrend
+
+3. **close_position**: Exit an existing position
+   - Use when: Profit target reached, stop loss triggered, or thesis invalidated
+
+4. **hold**: Maintain current positions OR wait for better opportunity
+   - Use when: No clear edge exists, or existing positions are performing as expected
+
+**IMPORTANT**: You are NOT required to trade if market conditions are unclear. Quality over quantity.
+
+---
+
+# TECHNICAL INDICATORS PROVIDED
+
+**RSI (Relative Strength Index)**: Overbought/Oversold conditions
+- RSI > 70 = Overbought (potential reversal down or trend continuation)
+- RSI < 30 = Oversold (potential reversal up)
+- RSI 40-60 = Neutral zone
+
+**MACD (Moving Average Convergence Divergence)**: Momentum & Trend
+- MACD > Signal = Bullish momentum
+- MACD < Signal = Bearish momentum
+- MACD crossover = Potential trend change
+
+**EMA(20) (Exponential Moving Average)**: Trend direction
+- Price > EMA = Uptrend
+- Price < EMA = Downtrend
+
+**24h Price Change**: Short-term momentum indicator
+
+**Funding Rate** (Perpetual only): Market sentiment
+- Positive funding = Bullish sentiment
+- Negative funding = Bearish sentiment
+
+---
+
+# DECISION-MAKING FRAMEWORK
+
+## Step 1: Analyze Current Positions
+- Are existing positions performing as expected?
+- Should any positions be closed (profit target, stop loss, invalidation)?
+
+## Step 2: Identify Market Conditions
+- What is the trend? (Use EMA, MACD, price action)
+- Is momentum strong or weakening? (Use MACD, RSI)
+- Is market overbought/oversold? (Use RSI)
+- What is sentiment? (Use funding rate if available)
+
+## Step 3: Scan for Opportunities
+- Do any pairs show clear technical setups?
+- Is risk/reward favorable (minimum 1.5:1)?
+- Do you have available capital?
+
+## Step 4: Risk Management Check
+- Does this trade fit your risk parameters?
+- Is stop loss placement logical?
+- Is position size appropriate for confidence level?
+
+## Step 5: Make Decision
+- If clear edge exists → Trade
+- If uncertain → Hold/Wait
+- **Never force trades**
+
+---
+
+# RISK MANAGEMENT RULES (MANDATORY)
+
+For EVERY trade, you must specify:
+
+1. **stop_loss_pct** (float): Percentage stop loss
+   - Typical range: 0.015 - 0.035 (1.5% - 3.5%)
+   - Place beyond recent support/resistance
+
+2. **take_profit_pct** (float): Percentage take profit
+   - Typical range: 0.03 - 0.08 (3% - 8%)
+   - Minimum 1.5:1 reward-to-risk ratio
+
+3. **confidence** (int, 0-100): Your conviction level
+   - 0-30: Low confidence (avoid trading)
+   - 30-60: Moderate confidence (standard sizing)
+   - 60-80: High confidence (acceptable)
+   - 80-100: Very high confidence (rare, use cautiously)
+
+4. **reasoning** (string): Your complete analysis
+   - What technical signals support this trade?
+   - What is the market context?
+   - What could invalidate this thesis?
+   - Why is risk/reward favorable?
+
+---
+
+# OUTPUT FORMAT
+
+You must respond with a JSON array. **ALWAYS start with your reasoning, then decide.**
+
+Format:
 ```json
 [
   {{
+    "reasoning": "BTC shows strong bullish divergence: RSI recovering from oversold (<30), MACD bullish crossover, price above EMA(20) at $42,500. Funding rate is neutral. Risk/reward is 1:2 with stop at $41,800 (-2.5%) and target at $44,200 (+4%). High confidence setup.",
     "action": "open_long",
     "symbol": "BTC-USDT",
-    "reasoning": "Strong uptrend with RSI oversold and MACD crossover",
     "stop_loss_pct": 0.025,
     "take_profit_pct": 0.05,
     "confidence": 75
@@ -505,13 +644,50 @@ You must respond with a JSON array in this exact format:
 ]
 ```
 
-**Important:**
-- Only output valid JSON, no other text
-- If you have NO positions, you MUST return at least one "open_long" or "open_short" action
-- If you already have positions at max capacity, you can return []
-- Try to make at least one trade decision per cycle
-- Be specific about your reasoning
-- Consider both technical indicators and market context
+**If no clear opportunity exists, return:**
+```json
+[
+  {{
+    "reasoning": "Market conditions are unclear. BTC range-bound with RSI neutral at 50, MACD flat. No clear directional bias. Waiting for better setup.",
+    "action": "hold",
+    "symbol": null,
+    "stop_loss_pct": null,
+    "take_profit_pct": null,
+    "confidence": 0
+  }}
+]
+```
+
+---
+
+# TRADING PHILOSOPHY
+
+**Core Principles:**
+1. **Capital Preservation First**: Protecting capital > chasing gains
+2. **Discipline Over Emotion**: Follow your plan, don't move stops
+3. **Quality Over Quantity**: Fewer high-conviction trades beat many random trades
+4. **Respect the Trend**: Don't fight strong directional moves
+5. **Learn from History**: Review recent trades to avoid repeated mistakes
+
+**Common Pitfalls to Avoid:**
+- ⚠️ Overtrading: Excessive trading erodes capital through fees
+- ⚠️ Revenge Trading: Don't increase size after losses
+- ⚠️ Analysis Paralysis: Don't wait for perfect setups
+- ⚠️ Ignoring Risk: Always set stops, never "hope" for recovery
+
+---
+
+# FINAL INSTRUCTIONS
+
+1. **Think before acting**: Analyze thoroughly before deciding
+2. **Be honest about confidence**: Don't overstate conviction
+3. **Provide detailed reasoning**: Explain your technical analysis
+4. **Respect risk management**: Always set proper stops and targets
+5. **Don't force trades**: It's OK to wait for better opportunities
+
+Remember: Consistent, disciplined trading beats aggressive speculation. Focus on high-probability setups with favorable risk/reward.
+
+Now analyze the market data and make your decision.
 """
     
     def _build_user_prompt(self, context: Dict) -> str:
@@ -521,29 +697,31 @@ You must respond with a JSON array in this exact format:
         prompt_parts = []
         
         # 1. 账户信息
-        prompt_parts.append(f"## Account Status")
+        prompt_parts.append(f"# ACCOUNT STATUS")
         prompt_parts.append(f"Total Capital: ${context['account']['total_amount_quote']:.2f}")
         prompt_parts.append(f"Active Positions: {len(context['positions'])}/{self.config.max_concurrent_positions}")
-        
-        # 🔥 强调：如果没有持仓必须开单
-        if len(context['positions']) == 0:
-            prompt_parts.append(f"\n⚠️  **ALERT: You have NO active positions! You MUST open at least one position now.**")
-            prompt_parts.append(f"Choose the best trading pair based on technical indicators below.")
+        prompt_parts.append(f"Available Slots: {self.config.max_concurrent_positions - len(context['positions'])}")
         
         # 2. 当前持仓
         if context["positions"]:
-            prompt_parts.append(f"\n## Current Positions")
+            prompt_parts.append(f"\n# CURRENT POSITIONS")
             for pos in context["positions"]:
                 prompt_parts.append(
-                    f"- {pos['symbol']} {pos['side']}: Entry ${pos['entry_price']:.2f}, "
-                    f"PnL: {pos['net_pnl_pct']*100:.2f}% (${pos['net_pnl_quote']:.2f}), "
-                    f"ID: {pos['executor_id']}"
+                    f"\n**{pos['symbol']} {pos['side']}**"
+                    f"\n- Entry Price: ${pos['entry_price']:.2f}"
+                    f"\n- Current PnL: {pos['net_pnl_pct']*100:.2f}% (${pos['net_pnl_quote']:.2f})"
+                    f"\n- Position ID: {pos['executor_id']}"
                 )
+                prompt_parts.append("\n**Action Required?** Evaluate if this position should be closed based on:")
+                prompt_parts.append("- Has profit target been reached?")
+                prompt_parts.append("- Is stop loss triggered?")
+                prompt_parts.append("- Is the thesis still valid?")
         else:
-            prompt_parts.append(f"\n## Current Positions: None (YOU MUST OPEN A POSITION)")
+            prompt_parts.append(f"\n# CURRENT POSITIONS")
+            prompt_parts.append(f"No active positions. You may open new positions if good opportunities exist.")
         
         # 3. 市场数据
-        prompt_parts.append(f"\n## Market Data")
+        prompt_parts.append(f"\n# MARKET DATA")
         for symbol, data in context["market_data"].items():
             if "error" in data:
                 continue
@@ -552,18 +730,59 @@ You must respond with a JSON array in this exact format:
             funding_rate = funding_info.get("rate", 0.0)
             
             prompt_parts.append(
-                f"\n### {symbol}\n"
-                f"- Price: ${data['current_price']:.2f}\n"
-                f"- 24h Change: {data['price_change_24h_pct']:.2f}%\n"
-                f"- RSI: {data['rsi']:.1f if data['rsi'] else 'N/A'}\n"
-                f"- MACD: {data['macd']:.2f if data['macd'] else 'N/A'}\n"
-                f"- EMA(20): ${data['ema_20']:.2f if data['ema_20'] else 'N/A'}\n"
-                f"- Funding Rate: {funding_rate*100:.4f}% (8h)" if funding_rate else ""
+                f"\n## {symbol}"
+                f"\n**Price & Trend:**"
+                f"\n- Current Price: ${data['current_price']:.2f}"
+                f"\n- 24h Change: {data['price_change_24h_pct']:.2f}%"
+                f"\n- EMA(20): ${data['ema_20']:.2f if data['ema_20'] else 'N/A'}"
             )
+            
+            if data['ema_20']:
+                if data['current_price'] > data['ema_20']:
+                    prompt_parts.append(f"- Trend: UPTREND (Price > EMA)")
+                else:
+                    prompt_parts.append(f"- Trend: DOWNTREND (Price < EMA)")
+            
+            prompt_parts.append(
+                f"\n**Technical Indicators:**"
+                f"\n- RSI: {data['rsi']:.1f if data['rsi'] else 'N/A'}"
+            )
+            
+            if data['rsi']:
+                if data['rsi'] > 70:
+                    prompt_parts.append(f"  → Overbought (potential reversal or strong trend)")
+                elif data['rsi'] < 30:
+                    prompt_parts.append(f"  → Oversold (potential reversal)")
+                else:
+                    prompt_parts.append(f"  → Neutral")
+            
+            prompt_parts.append(
+                f"- MACD: {data['macd']:.2f if data['macd'] else 'N/A'}"
+                f"\n- MACD Signal: {data['macd_signal']:.2f if data['macd_signal'] else 'N/A'}"
+            )
+            
+            if data['macd'] and data['macd_signal']:
+                if data['macd'] > data['macd_signal']:
+                    prompt_parts.append(f"  → Bullish momentum (MACD > Signal)")
+                else:
+                    prompt_parts.append(f"  → Bearish momentum (MACD < Signal)")
+            
+            if funding_rate:
+                prompt_parts.append(
+                    f"\n**Funding Rate:** {funding_rate*100:.4f}% (8h)"
+                )
+                if funding_rate > 0.0001:
+                    prompt_parts.append(f"  → Bullish sentiment (longs paying shorts)")
+                elif funding_rate < -0.0001:
+                    prompt_parts.append(f"  → Bearish sentiment (shorts paying longs)")
+                else:
+                    prompt_parts.append(f"  → Neutral sentiment")
         
         # 4. 历史交易记录
         if context["recent_trades"]:
-            prompt_parts.append(f"\n## Recent Trades (Last {len(context['recent_trades'])})")
+            prompt_parts.append(f"\n# RECENT TRADES (Last {len(context['recent_trades'])})")
+            prompt_parts.append("Learn from these trades to improve your strategy:\n")
+            
             for trade in context["recent_trades"]:
                 # 计算持仓时长
                 duration_hours = 0
@@ -571,31 +790,39 @@ You must respond with a JSON array in this exact format:
                     duration_hours = (trade['close_timestamp'] - trade['timestamp']) / 3600
                 
                 # 格式化交易信息
-                pnl_emoji = "✅" if trade['pnl_quote'] > 0 else "❌"
+                pnl_emoji = "✅ PROFIT" if trade['pnl_quote'] > 0 else "❌ LOSS"
                 prompt_parts.append(
-                    f"- {trade['symbol']} {trade['side']}: "
+                    f"- **{trade['symbol']} {trade['side']}**: "
                     f"Entry ${trade['entry_price']:.2f} → Exit ${trade['exit_price']:.2f}, "
                     f"PnL: {trade['pnl_pct']*100:.2f}% (${trade['pnl_quote']:.2f}) {pnl_emoji}, "
-                    f"Close: {trade['close_type']}, "
+                    f"Close Reason: {trade['close_type']}, "
                     f"Duration: {duration_hours:.1f}h"
                 )
         
-        prompt_parts.append(f"\n## Your Decision:")
+        # 5. 决策指令
+        prompt_parts.append(f"\n# YOUR DECISION")
         
-        # 根据持仓情况给出不同的指令
-        if len(context['positions']) == 0:
-            prompt_parts.append(f"🔥 **MANDATORY**: You have NO positions. You MUST open at least one position now.")
-            prompt_parts.append(f"Analyze the market data above and choose:")
-            prompt_parts.append(f"1. Which trading pair has the best setup?")
-            prompt_parts.append(f"2. Should you go LONG or SHORT?")
-            prompt_parts.append(f"3. Set appropriate stop loss and take profit.")
-        elif len(context['positions']) >= self.config.max_concurrent_positions:
-            prompt_parts.append(f"You have reached max positions ({self.config.max_concurrent_positions}).")
-            prompt_parts.append(f"Consider closing underperforming positions or holding current ones.")
-        else:
-            prompt_parts.append(f"You have {len(context['positions'])} position(s). Consider opening more or managing existing ones.")
+        prompt_parts.append(
+            f"\nBased on the above data, make your trading decision following these steps:\n"
+            f"\n**Step 1: Analyze Current Positions**"
+            f"\n- Should any existing positions be closed?"
+            f"\n- Are they performing as expected?"
+            f"\n\n**Step 2: Evaluate Market Conditions**"
+            f"\n- What is the overall trend for each pair?"
+            f"\n- Are there any clear technical setups?"
+            f"\n- What is the risk/reward ratio?"
+            f"\n\n**Step 3: Make Decision**"
+            f"\n- If clear opportunity exists → Open position"
+            f"\n- If existing position should exit → Close position"
+            f"\n- If no clear edge → Hold/Wait"
+            f"\n\n**Remember:**"
+            f"\n- Quality over quantity (don't force trades)"
+            f"\n- Always start with reasoning before deciding"
+            f"\n- Set appropriate stop loss and take profit"
+            f"\n- Be honest about your confidence level"
+        )
         
-        prompt_parts.append(f"\nProvide your trading decisions in JSON format.")
+        prompt_parts.append(f"\n\nProvide your decision in JSON format.")
         
         return "\n".join(prompt_parts)
     
@@ -681,14 +908,27 @@ You must respond with a JSON array in this exact format:
         self.logger().debug(f"Current positions: {current_positions}, Max allowed: {self.config.max_concurrent_positions}")
         
         for i, decision in enumerate(decisions, 1):
+            # 🔧 修复：先检查 reasoning（必须字段）
+            reasoning = decision.get("reasoning", "")
+            if not reasoning:
+                self.logger().warning(f"❌ Decision {i}: missing reasoning field - {decision}")
+                continue
+            
             action = decision.get("action")
             symbol = decision.get("symbol")
             
             self.logger().debug(f"Validating decision {i}: {action} {symbol}")
+            self.logger().debug(f"   Reasoning: {reasoning[:100]}...")  # 打印前100字符
             
-            # 基本字段检查
-            if not action or not symbol:
-                self.logger().warning(f"❌ Decision {i}: missing action or symbol - {decision}")
+            # hold 动作不需要 symbol
+            if action == "hold":
+                validated.append(decision)
+                self.logger().info(f"✅ Decision {i}: HOLD - {reasoning[:50]}...")
+                continue
+            
+            # 其他动作需要 symbol
+            if not symbol:
+                self.logger().warning(f"❌ Decision {i}: missing symbol for action {action}")
                 continue
             
             # 检查交易对是否在配置中
@@ -705,9 +945,11 @@ You must respond with a JSON array in this exact format:
                 # 检查止损止盈
                 stop_loss_pct = decision.get("stop_loss_pct", 0.02)
                 take_profit_pct = decision.get("take_profit_pct", 0.04)
+                confidence = decision.get("confidence", 50)
                 
-                self.logger().debug(f"   SL: {stop_loss_pct*100:.1f}%, TP: {take_profit_pct*100:.1f}%")
+                self.logger().debug(f"   SL: {stop_loss_pct*100:.1f}%, TP: {take_profit_pct*100:.1f}%, Confidence: {confidence}%")
                 
+                # 验证风险回报比
                 if take_profit_pct < stop_loss_pct * 1.5:
                     self.logger().warning(f"⚠️  Decision {i}: R/R ratio too low for {symbol}, adjusting TP from {take_profit_pct*100:.1f}% to {stop_loss_pct*200:.1f}%")
                     decision["take_profit_pct"] = stop_loss_pct * 2
