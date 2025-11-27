@@ -430,11 +430,10 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
             system_prompt = self._build_system_prompt()
             user_prompt = self._build_user_prompt(context)
             
-            self.logger().warning(f"System prompt length: {len(system_prompt)} chars")
-            self.logger().warning(f"User prompt length: {len(user_prompt)} chars")
-            
-            # 打印 User Prompt 的前 500 字符用于调试
-            self.logger().info(f"User prompt preview:\n{user_prompt[:500]}...")
+
+            self.logger().warning(f"System prompt: {system_prompt}")
+            self.logger().warning(f"User prompt: {user_prompt}")
+        
             
             # Step 2: 使用 LangChain 调用 LLM
             self.logger().info("Calling LLM API...")
