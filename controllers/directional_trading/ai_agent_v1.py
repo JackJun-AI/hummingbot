@@ -788,12 +788,18 @@ Now analyze the market data and make your decision.
             funding_info = context["funding_rates"].get(symbol, {})
             funding_rate = funding_info.get("rate", 0.0)
             
+            # 🔧 修复：先格式化各个值
+            ema_str = f"${data['ema_20']:.2f}" if data['ema_20'] is not None else "N/A (insufficient data)"
+            rsi_str = f"{data['rsi']:.1f}" if data['rsi'] is not None else "N/A (insufficient data)"
+            macd_str = f"{data['macd']:.2f}" if data['macd'] is not None else "N/A (insufficient data)"
+            macd_signal_str = f"{data['macd_signal']:.2f}" if data['macd_signal'] is not None else "N/A (insufficient data)"
+            
             prompt_parts.append(
                 f"\n## {symbol}{data_warning}"
                 f"\n**Price & Trend:**"
                 f"\n- Current Price: ${data['current_price']:.2f}"
                 f"\n- 24h Change: {data['price_change_24h_pct']:.2f}%"
-                f"\n- EMA(20): ${data['ema_20']:.2f if data['ema_20'] else 'N/A (insufficient data)'}"
+                f"\n- EMA(20): {ema_str}"
             )
             
             if data['ema_20']:
@@ -804,7 +810,7 @@ Now analyze the market data and make your decision.
             
             prompt_parts.append(
                 f"\n**Technical Indicators:**"
-                f"\n- RSI: {data['rsi']:.1f if data['rsi'] else 'N/A (insufficient data)'}"
+                f"\n- RSI: {rsi_str}"
             )
             
             if data['rsi']:
@@ -816,8 +822,8 @@ Now analyze the market data and make your decision.
                     prompt_parts.append(f"  → Neutral")
             
             prompt_parts.append(
-                f"- MACD: {data['macd']:.2f if data['macd'] else 'N/A (insufficient data)'}"
-                f"\n- MACD Signal: {data['macd_signal']:.2f if data['macd_signal'] else 'N/A (insufficient data)'}"
+                f"- MACD: {macd_str}"
+                f"\n- MACD Signal: {macd_signal_str}"
             )
             
             if data['macd'] and data['macd_signal']:
