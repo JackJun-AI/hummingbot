@@ -370,17 +370,40 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 max_records=self.config.candles_max_records
             )
             
-            self.logger().debug(f"Received {len(candles) if not candles.empty else 0} candles for {trading_pair}")
+            # 🔑 关键修复：过滤未来数据（防止 look-ahead bias）
+            # 兼容实盘和回测两种模式
+            if hasattr(self.market_data_provider, 'time'):
+                current_time = self.market_data_provider.time()
+                
+                if not candles.empty and "timestamp" in candles.columns:
+                    before_filter = len(candles)
+                    candles = candles[candles["timestamp"] <= current_time]
+                    after_filter = len(candles)
+                    
+                    # 只在回测时记录过滤信息（避免实盘日志过多）
+                    if before_filter != after_filter:
+                        self.logger().warning(
+                            f"🔒 Time filter: {before_filter} → {after_filter} candles "
+                            f"(current_time: {pd.to_datetime(current_time, unit='s')})"
+                        )
+                    
+                    # 只保留最近 max_records 条（避免计算太多历史数据）
+                    if len(candles) > self.config.candles_max_records:
+                        candles = candles.tail(self.config.candles_max_records)
+                        self.logger().warning(f"   Keeping last {self.config.candles_max_records} candles")
+            
+            self.logger().warning(f"Received {len(candles) if not candles.empty else 0} candles for {trading_pair}")
             
             if candles.empty or len(candles) < 20:
                 self.logger().warning(
                     f"❌ Insufficient candles for {trading_pair}: {len(candles) if not candles.empty else 0} rows\n"
+                    f"   Current time: {pd.to_datetime(current_time, unit='s') if 'current_time' in locals() else 'N/A'}\n"
                     f"   Available feeds: {available_keys}\n"
                     f"   Looking for: {self.config.connector_name}_{trading_pair}_{self.config.interval}"
                 )
                 return {"error": "insufficient_data", "symbol": trading_pair, "candles_count": len(candles) if not candles.empty else 0}
             
-            # 计算技术指标
+            # 计算技术指标（只使用当前时刻及之前的数据）
             close = candles["close"]
             high = candles["high"]
             low = candles["low"]
@@ -404,12 +427,16 @@ class AIAgentV1Controller(DirectionalTradingControllerBase):
                 "volume_24h": float(candles["volume"].sum()),
             }
             
-            self.logger().debug(
-                f"✅ {trading_pair}: Price=${current_price:.2f}, "
-                f"RSI={market_info['rsi']:.1f if market_info['rsi'] else 'N/A'}, "
-                f"MACD={market_info['macd']:.2f if market_info['macd'] else 'N/A'}"
-            )
+            # 🔧 修复：先格式化值，再构建日志字符串
+            rsi_str = f"{market_info['rsi']:.1f}" if market_info['rsi'] is not None else 'N/A'
+            macd_str = f"{market_info['macd']:.2f}" if market_info['macd'] is not None else 'N/A'
+            ema_str = f"${market_info['ema_20']:.2f}" if market_info['ema_20'] is not None else 'N/A'
             
+            self.logger().warning(
+                f"✅ {trading_pair}: Price=${current_price:.2f}, "
+                f"RSI={rsi_str}, MACD={macd_str}, EMA(20)={ema_str}"
+            )
+            self.logger().warning(market_info)
             return market_info
             
         except Exception as e:
