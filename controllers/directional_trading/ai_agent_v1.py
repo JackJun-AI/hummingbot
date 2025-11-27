@@ -588,12 +588,12 @@ Required fields for each decision:
 ```json
 [
   {
-    "reasoning": "BTC-USDT shows a clear uptrend with price at $50,200 holding above EMA(20) at $49,800, confirming bullish structure. MACD histogram is expanding positively (0.45 → 0.52 → 0.61), indicating strengthening momentum. RSI at 58 is healthy (not overbought), suggesting room for continuation. Price has pulled back from $50,500 to $50,200, forming a higher low near the EMA, which is a textbook long entry. Stop loss at $49,500 (below EMA and recent swing low) gives 1.4% risk. Take profit at $51,800 (resistance level) offers 3.2% reward, yielding 2.3:1 R/R. This setup meets all checklist criteria with strong trend, momentum, and structure confluence.",
-    "action": "open_long",
-    "symbol": "BTC-USDT",
-    "stop_loss_pct": 0.014,
-    "take_profit_pct": 0.032,
-    "confidence": 75
+    "reasoning": "",
+    "action": "",
+    "symbol": "",
+    "stop_loss_pct": 0.025,
+    "take_profit_pct": 0.05,
+    "confidence": 0
   }
 ]
 ```
